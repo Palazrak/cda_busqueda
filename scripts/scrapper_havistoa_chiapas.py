@@ -12,11 +12,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Extraer las credenciales de la base de datos desde variables de entorno
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
-DB_PORT = "5432"
+DB_NAME = os.getenv('DB_NAME')
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 
 # Función para insertar múltiples registros en la base de datos
 def insert_many_to_db(data_list: list,
@@ -36,25 +36,13 @@ def insert_many_to_db(data_list: list,
             port=DB_PORT
         )
         cur = conn.cursor()
-        
-        # Crear tabla si no existe
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS desaparecidos (
-                id SERIAL PRIMARY KEY,
-                fecha_extraccion DATE NOT NULL,
-                url_origen TEXT NOT NULL,
-                fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                localizado BOOLEAN DEFAULT FALSE,
-                datos JSONB
-            );
-        ''')
 
         # Asegurarse de que extraction_date esté en formato de cadena adecuado para PostgreSQL
         extraction_date_str = extraction_date.strftime('%Y-%m-%d')
         
         # Preparar consulta de inserción con los nuevos campos
         insert_query = """
-            INSERT INTO desaparecidos (fecha_extraccion, url_origen, datos)
+            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
             VALUES (%s, %s, %s)
         """
         # Ejecutar inserción masiva

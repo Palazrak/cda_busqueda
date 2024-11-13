@@ -9,8 +9,39 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: mysecretpassword
       POSTGRES_DB: cda_busqueda
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Named volume for persistent data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # Mount the SQL script for initialization
+    networks:
+      - app-network
+
   scrapper:
     container_name: python_scrapper
     build:
       context: ./
       dockerfile: Dockerfile
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+
+  postgrest:
+    image: postgrest/postgrest
+    container_name: postgrest
+    environment:
+      PGRST_DB_URI: postgres://postgres:mysecretpassword@postgres:5432/cda_busqueda
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: anon
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"  # Expose PostgREST on port 3000
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:  # Define named volume here, without any additional paths or spaces
