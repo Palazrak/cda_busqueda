@@ -5,18 +5,13 @@ import time
 import datetime
 import random
 import psycopg2
-import os
-from dotenv import load_dotenv
-
-# Cargar variables de entorno
-load_dotenv()
 
 # Extraer las credenciales de la base de datos desde variables de entorno
-DB_NAME = os.getenv('DB_NAME')
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
+DB_NAME = "cda_busqueda"
+DB_USER = "postgres"
+DB_PASSWORD = "mysecretpassword"
+DB_HOST = "postgres"
+DB_PORT = "5432"
 
 # Función para insertar múltiples registros en la base de datos
 def insert_many_to_db(data_list: list,
@@ -125,10 +120,8 @@ def scrape_all_pages(source_url: str,
     """
     next_page = source_url
     all_data = []
-    num = 0
     
     while next_page:
-        print(f"Scrapeando página {num}")
         response = requests.get(next_page)
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -141,7 +134,6 @@ def scrape_all_pages(source_url: str,
             
             unavailable_message = ficha_soup.select_one('h1.display-4')
             if unavailable_message and "Lo sentimos esta ficha ya no esta disponible" in unavailable_message.get_text(strip=True):
-                print(f"Ficha en {link} no está disponible. Saltando...")
                 continue
 
             data_section = ficha_soup.select_one('div.emp-profile-wrap')
@@ -158,7 +150,6 @@ def scrape_all_pages(source_url: str,
         
         # Pausa aleatoria para evitar sobrecargar el servidor
         time.sleep(random.uniform(0.5, 2))
-        num += 1
     
     return all_data
     

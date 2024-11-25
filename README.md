@@ -29,6 +29,14 @@ Dentro de la base de datos, se tiene una tabla con la siguiente estructura:
 
 Fue relevante utilizar JSONB para aprovechar la ventaja de la búsqueda fonética mientras que aprovechamos la flexibilidad que ofrecen los json. Ya que las fiscalías son estatales y no tienen un formato generalizado, es necesario permitir esa flexibilidad.
 
+# 1.2 API PostgREST
+
+La API que decidimos utilizar para hacer consultas a la base de datos es PostgREST. Está montada en el puerto 3000.
+
+# 1.3 Frontend: NodeJS
+
+La página interactiva que se puede utilizar para hacer las operaciones de búsqueda (y eventualmente de inserción) a la base de datos está ubicada en el puerto 3001 y fue hecha con NodeJS y diseñada para ser Responsive.
+
 ## 2. Inicialización del proyecto
 
 Una vez descargado el repo, es necesario un .env con ciertas credenciales para que ejecute inmediatamente. A la altura del repositorio, en la terminal, es necesario ejecutar el siguiente comando:
