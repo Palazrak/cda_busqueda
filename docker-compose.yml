@@ -39,6 +39,23 @@ services:
     networks:
       - app-network
 
+  frontend:
+    container_name: nextjs_frontend
+    build:
+      context: .  # Changed from ./frontend to .
+      dockerfile: ./frontend/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - NEXT_PUBLIC_API_URL=http://localhost:3000
+    depends_on:
+      - postgrest
+    networks:
+      - app-network
+    restart: unless-stopped
+
 networks:
   app-network:
     driver: bridge
