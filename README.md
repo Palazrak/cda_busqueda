@@ -58,3 +58,9 @@ Dentro del contenedor, pueden hacerse consultas sobre la tabla `desaparecidos`. 
 ```bash
 curl http://localhost:3000/desaparecidos
 ```
+
+Un ejemplo de búsqueda simple (esto es, únicamente a partir del nombre) es:
+
+```bash
+curl "http://localhost:3000/desaparecidos?datos->>nombre=eq.JORGE%20ORLANDO%20FUNES%20MURCIA"
+```

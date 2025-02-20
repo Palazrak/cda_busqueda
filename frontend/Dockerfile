@@ -1,17 +1,17 @@
-# Usa una imagen oficial de Node.js como base
+# Usa una imagen oficial de Node.js ligera
 FROM node:18-alpine
 
 # Establece el directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# Copia package.json y package-lock.json al contenedor
+# Copia solo los archivos de dependencias primero (para aprovechar la caché de Docker)
 COPY ./frontend/package*.json ./
 
-# Instala las dependencias
-RUN npm install sharp && npm install
+# Instala las dependencias de manera optimizada
+RUN npm install --frozen-lockfile
 
-# Copia el resto del código de la aplicación al contenedor
-COPY ./frontend .
+# Copia el resto del código de la aplicación
+COPY ./frontend . 
 
 # Construye la aplicación Next.js
 RUN npm run build
