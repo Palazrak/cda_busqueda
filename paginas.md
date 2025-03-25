@@ -213,7 +213,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Tiene un carrusel de imagenes al cual se le hace click para abrir la ficha
     - Cada ficha esta en HTML
     - 7756 Fichas
-  - [ ] Amber: [link](https://alertaamber.fgr.org.mx/)
+  - [x] Amber: [link](https://alertaamber.fgr.org.mx/)
     - Tiene un mapa con todos los estados
     - Por estado, aparece un carrusel con algunos elementos
     - Cada elemento tiene un PDF que se abre automaticamente
@@ -224,3 +224,23 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Tiene tambien el folio unico de busqueda
     - No todos tienen imagen
     - Hay una pagina de estadisticas: [link](https://versionpublicarnpdno.segob.gob.mx/Dashboard/ContextoGeneral)
+
+# NOTAS
+
+- App Alerta Amber Nacional
+  - En el carrusel hay imagenes de "LOCALIZADA" con la ruta "<img src="../../Images/localizada.png">". Su full xpath es /html/body/div/section/section/div/div[1]/div/div[1]/div/img
+  - Estado 0 es nacional. Estado 1 no existe. Estado 2 es aguascalientes. Estado 33 es zacatecas. Estan ordenados de mayor a menor. Por alguna razon, despues de 34 considera estados de Estados Unidos
+  - Los links para cada PDF estan en /html/body/div/section/section/div/div[1]/div/div[1]/a, como un elemento de la forma:"
+
+    ```html
+    <a href="/Alerta/CreaAlertaPDFPublico?numero_reporte=2056" target="_blank">
+        <img class="carousel-image" alt="Image Caption" style="border-color: rgb(219, 7, 11); width: 126.549px; display: inline-block; height: 126.549px; overflow: hidden;" src="/Alerta/ObtenerFotoDesaparecido?numero_reporte=2056">
+    </a>"
+    ```
+
+  - Puede saberse cuantos elementos hay dentro del carrusel para cada uno de dos formas. Contando cuantos "carousel feature" hay (/html/body/div/section/section/div/div[1]/div/div[2]) o entrando a un tracker-sumation-containter, especificamente al tracker-summation-total(/html/body/div/section/section/div/div[1]/div/div[5]/span[3]), con el formato: <span class="tracker-summation-total">4</span>
+- Sobre los PDF de amber:
+  - Ya tengo un scrappeo de PDF para amber general. Hare un desglose de compatibilidades (o incompatibilidades) entre formatos
+    - TABASCO: No es una tabla, sino lineas
+    - AGUASCALIENTES: igual en tablas. Cuando esta localizada, encima hay un texto azul que dice LOCALIZADA
+- Hay inconsistencias en el sistema aun. Por ejemplo, la ficha de ANGEL ALDAIR ORTEGA LERMA. Deberia aparecer como "desactivada", hay errores en como se guarda la informacion, aparece algo de acompañantes (que no deberia guardarse), etc.
