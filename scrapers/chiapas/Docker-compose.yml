@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  selenium-hub:
+    image: seleniarm/standalone-chromium:latest
+    platform: linux/arm64
+    ports:
+      - "4444:4444"
+      - "7900:7900"
+    environment:
+      - SE_NODE_MAX_SESSIONS=4
+      - SE_NODE_OVERRIDE_MAX_SESSIONS=true
+      - SE_NODE_SESSION_TIMEOUT=300
+      - SE_START_VNC=true
+      - SE_VNC_NO_PASSWORD=true
+    shm_size: '2gb'
+
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/app
+    environment:
+      - SELENIUM_HOST=selenium-hub
+      - SELENIUM_PORT=4444
+    depends_on:
+      - selenium-hub
