@@ -55,6 +55,22 @@ services:
     networks:
       - app-network
     restart: unless-stopped
+  
+  backend:
+    container_name: fastapi_backend
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgrest
+    networks:
+      - app-network
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=us-east-1
 
 networks:
   app-network:

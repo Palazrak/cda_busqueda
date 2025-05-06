@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DB_NAME = "cda_busqueda"
 DB_USER = "postgres"
 DB_PASSWORD = "mysecretpassword"
-DB_HOST = "localhost"
+DB_HOST = "postgres"
 DB_PORT = "5432"
 
 # Diccionario para mapear el id_estado con el estado correspondiente (orden alfabético)
