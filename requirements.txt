@@ -2,3 +2,8 @@ beautifulsoup4==4.12.3
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
 requests==2.31.0
+threadpoolctl==3.5.0
+lxml==4.9.2
+lxml_html_clean==0.4.1
+requests-html==0.10.0
+PyMuPDF==1.22.5

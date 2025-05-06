@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DB_NAME = "cda_busqueda"
 DB_USER = "postgres"
 DB_PASSWORD = "mysecretpassword"
-DB_HOST = "localhost"
+DB_HOST = "postgres"
 DB_PORT = "5432"
 
 # Diccionario para mapear el id_estado con el estado correspondiente (orden alfabético)
@@ -80,7 +80,7 @@ def insert_many_to_db(data_list, extraction_date, source_url):
         conn.commit()
         print(f"✅ Insertados {len(records)} registros en la BD.")
     except Exception as e:
-        pass
+        print("Error insertando en BD:", e)
     finally:
         if cur:
             cur.close()
@@ -174,7 +174,8 @@ def scrape_page(id_estado):
     Procesa la página correspondiente a un id_estado y retorna una lista de registros extraídos.
     Se asigna el campo "estado" usando el mapeo del diccionario.
     """
-    base_url = "https://appalertaamber.fgr.org.mx"
+    # Actualizamos el base_url al nuevo dominio que funciona:
+    base_url = "https://appalertaamber1.fgr.org.mx"
     headers = {"User-Agent": "Mozilla/5.0"}
     results = []
     page_url = f"{base_url}/Alerta/CarruselGB?id_estado={id_estado}"
@@ -213,6 +214,7 @@ def scrape_page(id_estado):
 def scrape_macro_parallel():
     """Procesa las páginas en paralelo. Cada thread obtiene su propia lista de resultados y, al finalizar,
     se unen todos en una única lista."""
+    # Iteramos sobre los estados: 0 y del 2 al 33
     estados_ids = [0] + list(range(2, 34))
     all_data = []
     max_workers = max(24, multiprocessing.cpu_count() * 2)
@@ -228,7 +230,7 @@ def main():
     start_time = time.time()
     data_list = scrape_macro_parallel()
     extraction_date = datetime.date.today()
-    source_url = "https://appalertaamber.fgr.org.mx/Alerta/CarruselGB"
+    source_url = "https://appalertaamber1.fgr.org.mx/Alerta/CarruselGB"
     insert_many_to_db(data_list, extraction_date, source_url)
     end_time = time.time()
     print(f"⏳ Tiempo total de ejecución: {end_time - start_time:.2f} segundos")
