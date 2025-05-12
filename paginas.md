@@ -9,15 +9,17 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Carrusel de personas con fotos y poca informacion
     - Al dar click a cada persona se deberia abrir una pagina, pero marca error del servidor
     - Hay otra pagina ([pagina de inicio](https://www.fiscalia-aguascalientes.gob.mx/)) que incluye 3 carruseles: personas no localizadas, alerta amber y alerta alba. Se abren fichas en PDF
-  - [ ] Alerta amber: [link](https://www.fiscalia-aguascalientes.gob.mx/Alerta_Amber.aspx)
+  - [X] Alerta amber: [link](https://www.fiscalia-aguascalientes.gob.mx/Alerta_Amber.aspx)
     - Mismo formato de pagina que la fiscalia
     - Abre PDF con formato muy similar al de Amber Nacional
 - [ ] Baja California
-  - Fiscalia General del Estado de Baja California: [link](https://www.fgebc.gob.mx/servicios/nolocalizados)
+  - [ ] Fiscalia General del Estado de Baja California: [link](https://www.fgebc.gob.mx/servicios/nolocalizados)
     - Se debe llenar al menos un campo para que aparezcan coincidencias
     - Al dar buscar, aparece una tabla con los resultados de la busqueda
     - Al hacer click a uno en especifico, se abre una ventana con la informacion
     - En el codigo fuente aparecen scripts para la busqueda. Al buscar mejor probablemente pueda encontrar la fuente de datos completa
+  - [ ] Amber [link](https://fgebc.gob.mx/component/tags/tag/alerta-amber)
+    - Solo contiene una ficha de 2020
 - [ ] Baja California Sur
   - Parece que solo es posible a traves de publicaciones de Facebook de la Comision Estatal de Búsqueda de Personas de Baja California
   - Amber solo está disponible en la pagina del nacional (implica información reducida)
@@ -42,7 +44,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Lista con todas las personas y estatus explicito
     - Se pueden descargar las fichas individuales en PDF y contienen mucha mas informacion
     - No se si el PDF se autogenere o este ya cargado
-  - [ ] Amber: [link](https://www.fgjcdmx.gob.mx/nuestros-servicios/servicios-la-ciudadania/alerta-amber-df)
+  - [X] Amber: [link](https://www.fgjcdmx.gob.mx/nuestros-servicios/servicios-la-ciudadania/alerta-amber-df)
     - Hay una seccion de "activacion" que contiene fotos de fichas de Alertas Amber con un formato distinto al general
     - Las fichas estan pegadas secuencialmente y son JPG
 - [ ] Coahuila
@@ -67,7 +69,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
   - [ ] Comision de Derechos Humanos del Estado de Mexico: [link](https://www.codhem.org.mx/personas-desaparecidas/)
     - Pestañas que pueden incluir (o no) fotos o documentos. A veces son fotos de las impresiones, incluso con rotaciones.
     - Tiene una seccion de Amber, donde sube fotos en JPG de las fichas
-  - [ ] Amber: [link](https://cobupem.edomex.gob.mx/alerta-amber)
+  - [X] Amber: [link](https://cobupem.edomex.gob.mx/alerta-amber)
     - Mismo formato que la COBUPEM, tambien con imagenes en JPG de las fichas, pero con el formato general.
 - [ ] Guanajuato
   - [ ] Personas Desaparecidas: Fiscalia General el Estado de Guanajuato: [link](https://portal.fgeguanajuato.gob.mx/PortalWebEstatal/PersonasDesaparecidas/Formularios/index.aspx)
@@ -76,7 +78,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Incluye Alerta Amber, Protocolo Alba, "Te estamos buscando" y no se si otro
     - De Amber y Alba, al dar click en "Ver Detalles", salen JPG con las fichas
     - De "Te estamos buscando", al dar click en "ver detalles" sale una ventana con elementos en HTML. La imagen puede ser o la ficha o la persona
-  - [ ] Amber: [link](https://portal.fgeguanajuato.gob.mx/PortalWebEstatal/AlertaAmber/Formularios/frmAAEstado.aspx)
+  - [X] Amber: [link](https://portal.fgeguanajuato.gob.mx/PortalWebEstatal/AlertaAmber/Formularios/frmAAEstado.aspx)
     - Hay un carrusel que incluye foto, nombre, edad, fecha de desaparicion y lugar (municipio). No se puede expandir ni obtener mas informacion
     - Tambien hay una pagina de Facebook
 - [ ] Guerrero
@@ -88,7 +90,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
   - [ ] Registro Estatal de Personas Desaparecidas: [link](https://version-publica-repd.jalisco.gob.mx/cedulas-de-busqueda)
     - Incluye fichas principalmente de Jalisco, pero tambien de Michoacan, Guanajuato y "Mexico"
     - Se selecciona un estado y se da a "buscar". Posteriormente se generan JSON con la informacion de las personas
-  - [ ] Fiscalia Especial en Personas Desaparecidas: [link](https://fiscaliaenpersonasdesaparecidas.jalisco.gob.mx/?f1=&f2=&f3=&f4=&wpcfs=preset-1)
+  - [X] Fiscalia Especial en Personas Desaparecidas: [link](https://fiscaliaenpersonasdesaparecidas.jalisco.gob.mx/?f1=&f2=&f3=&f4=&wpcfs=preset-1)
     - Grid de fotografias de fichas
     - Al dar click a cada ficha, se abre una nueva pagina con la ficha en JPG
     - Incluye Amber, Alba y Fiscalia. Hay carruseles exclusivos para cada uno
@@ -105,8 +107,8 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
   - [ ] Fiscalia General del Estado de Morelos: [link](https://fiscaliamorelos.gob.mx/cedulas/)
     - Grid de fotos y nombres
     - Al darle click, se abre una nueva ventana con un JPG de la ficha
-  - [ ] Alerta Amber: [link](https://fiscaliamorelos.gob.mx/alerta-amber-morelos/)
-    - Formato parecido al de la fiscalia, solo que hay opciones para ver mas ventanas y aparecen aal final de la pagina, por debajo de un video
+  - [X] Alerta Amber: [link](https://fiscaliamorelos.gob.mx/alerta-amber-morelos/)
+    - Formato parecido al de la fiscalia, solo que hay opciones para ver mas ventanas y aparecen al final de la pagina, por debajo de un video
 - [ ] Nayarit
   - [ ] Alerta Amber: [link](https://fiscaliageneral.nayarit.gob.mx/web/container.php?page=amber&ttl=23)
     - En un body de contenidobusqueda estan las fichas
@@ -131,7 +133,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Hay 14 paginas de elementos (se itera por el URL)
   - La pagina formal de amber no funciona. Si hay de Facebook
 - [ ] Puebla
-  - [ ] Ayudanos a encontrarlos: [link](https://cbpep.puebla.gob.mx/ayudanos-a-encontrarlos)
+  - [ ] Ayudanos a encontrarlos: [link](http//cbpep.puebla.gob.mx/ayudanos-a-encontrarlos)
     - Contenedor con imagenes en JPG. Al hacer click en cada imagen sale una nueva pagina con el JPG
   - De Amber solo hay pagina de Facebook y de Twitter
 - [ ] Querétaro
@@ -146,13 +148,13 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Ventanas con elementos en un grid
     - Al darle click a cada foto, aparece una ventana mas grande con un JPG
     - Hay para seleccionar siguiente y fin, se actualiza el page en el URL
-  - [ ] Amber: [link](https://www.fgeqroo.gob.mx/alertas/Amber)
+  - [X] Amber: [link](https://www.fgeqroo.gob.mx/alertas/Amber)
     - Identico
   - [ ] Alba: [link](https://www.fgeqroo.gob.mx/protocolos/Alba)
     - Identico
 - [ ] San Luis Potosí
-  - [ ] Fiscalia General del Estado: [link](https://www.fgeqroo.gob.mx/protocolos/Alba)
-    - Elementos en un div con nombre, foto y edad
+  - [ ] Fiscalia General del Estado: [link](https://fiscaliaslp.gob.mx/vi/busqueda-de-personas-no-localizadas/)
+    - Elementos en un div con nombre, foto
     - Al darles click, abre una nueva ventana con un JPG
   - De Amber solo hay un Facebook
 - [ ] Sinaloa
@@ -172,7 +174,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
   - [ ] Fiscalia de Tabasco: [link](https://www.fiscaliatabasco.gob.mx/AtencionVictimas/PersonasDesaparecidas)
     - Seccion llamada "contened" con foto, nombre y edad de personas
     - Al dar click, se abre un PDF con la info completa
-  - [ ] Amber: [link](https://www.fiscaliatabasco.gob.mx/AtencionVictimas/AlertaAmber)
+  - [X] Amber: [link](https://www.fiscaliatabasco.gob.mx/AtencionVictimas/AlertaAmber)
     - Mismo formato que la fiscalia
     - Apenas entre ya vi que hay fichas duplicadas segun nombre en Mayuscula o minuscula
   - [ ] Alba: [link](https://www.fiscaliatabasco.gob.mx/AtencionVictimas/AlertaAlba)
@@ -184,7 +186,7 @@ Se tiene una lista con todas las fuentes de datos con fichas de desaparecidos pa
     - Al hacer click se abre una nueva pagina en HTML, pero parece que son los mismos elementos que la version scrollable de fuera
     - Hay botones de siguiente, ultimo, etc
     - En esta se habla de recompensas, no se en que afecte
-  - No encontre un link de Amber que incluyera todas las fichas
+  - No encontre un link de Amber que incluyera todas las fichas [link](https://www.fgjtam.gob.mx/boletin_busqueda/alerta-amber-6/)
 - [ ] Tlaxcala
   - [ ] Comision Estatal de Busqueda de Personas: [link](https://cebp.tlaxcala.gob.mx/index.php/acciones/no-localizadas)
     - Contenedor con JPG de todas las fichas
