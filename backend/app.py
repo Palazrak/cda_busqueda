@@ -7,6 +7,12 @@ import json
 from dotenv import load_dotenv
 from typing import Optional
 
+#EDIT: imports mínimos para disparar scrapers sin bloquear la API
+import sys  #EDIT
+import subprocess  #EDIT
+import threading  #EDIT
+from pathlib import Path  #EDIT
+
 app = FastAPI()
 
 # Permitir CORS para que tu front pueda llamar a este API
@@ -88,3 +94,42 @@ async def busqueda_avanzada(
             continue
 
     return {"resultados": resultados}
+
+
+#EDIT: endpoint de salud simple para healthchecks
+@app.get("/healthz")  #EDIT
+def healthz():  #EDIT
+    return {"ok": True}  #EDIT
+
+
+
+#EDIT: función interna que lanza los scrapers sin bloquear la petición
+def _launch_scrapers_background():  #EDIT
+    """Lanza uno o varios scrapers en procesos independientes."""  #EDIT
+    # Ajusta las rutas a tus scripts reales si difieren:  #EDIT
+    candidate_cmds = [  #EDIT
+        [sys.executable, "scripts/paralelizado/paralelo_amber_cdmx.py"],  #EDIT
+        # Agrega aquí otros scrapers si los quieres disparar también:        #EDIT
+        # [sys.executable, "scripts/paralelizado/paralelo_estado_X.py"],     #EDIT
+        # [sys.executable, "scripts/serial/amber_cdmx.py"],                  #EDIT
+    ]  #EDIT
+
+    cwd = Path(".").resolve()  #EDIT
+    for cmd in candidate_cmds:  #EDIT
+        script_path = (cwd / cmd[-1]).resolve() if len(cmd) >= 2 else None  #EDIT
+        if script_path and script_path.exists():  #EDIT
+            try:  #EDIT
+                subprocess.Popen(cmd, cwd=str(cwd))  #EDIT
+                print(f"[backend] Lanzado scraper: {' '.join(cmd)}")  #EDIT
+            except Exception as e:  #EDIT
+                print(f"[backend] Error lanzando {' '.join(cmd)} :: {e}")  #EDIT
+        else:  #EDIT
+            print(f"[backend] No encontrado: {' '.join(cmd)}")  #EDIT
+
+
+#EDIT: endpoint que el scheduler invoca cada X minutos
+@app.post("/run-scrapers")  #EDIT
+def run_scrapers_endpoint():  #EDIT
+    t = threading.Thread(target=_launch_scrapers_background, daemon=True)  #EDIT
+    t.start()  #EDIT
+    return {"status": "accepted"}  #EDIT

@@ -1,5 +1,6 @@
 version: "3.1"
-services: 
+
+services:
   postgres:
     image: postgres:latest
     container_name: postgres
@@ -10,8 +11,8 @@ services:
       POSTGRES_PASSWORD: mysecretpassword
       POSTGRES_DB: cda_busqueda
     volumes:
-      - postgres_data:/var/lib/postgresql/data  # Named volume for persistent data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # Mount the SQL script for initialization
+      - postgres_data:/var/lib/postgresql/data # Named volume for persistent data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql # Mount the SQL script for initialization
     networks:
       - app-network
 
@@ -24,6 +25,8 @@ services:
       - postgres
     networks:
       - app-network
+    # (opcional) si quieres mantener el contenedor siempre vivo para EXEC, puedes añadir:
+    # restart: unless-stopped
 
   postgrest:
     image: postgrest/postgrest
@@ -35,14 +38,14 @@ services:
     depends_on:
       - postgres
     ports:
-      - "3000:3000"  # Expose PostgREST on port 3000
+      - "3000:3000" # Expose PostgREST on port 3000
     networks:
       - app-network
 
   frontend:
     container_name: nextjs_frontend
     build:
-      context: .  # Changed from ./frontend to .
+      context: . # Changed from ./frontend to .
       dockerfile: ./frontend/Dockerfile
     ports:
       - "3001:3001"
@@ -63,6 +66,12 @@ services:
       dockerfile: ./backend/Dockerfile
     ports:
       - "8000:8000"
+    healthcheck: #EDIT
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/healthz"] #EDIT
+      interval: 20s #EDIT
+      timeout: 5s #EDIT
+      retries: 6 #EDIT
+      start_period: 20s #EDIT
     depends_on:
       - postgrest
     networks:
@@ -72,9 +81,24 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=us-east-1
 
+  scheduler:
+    build: ./scheduler
+    container_name: scheduler
+    depends_on:
+      - backend
+    environment:
+      SCHEDULE_EVERY_SECONDS: "600" #PRUEBA CON 600s    
+      # endpoint interno del backend en la red de Docker
+      BACKEND_TRIGGER_URL: "http://backend:8000/run-scrapers"
+      # tiempo máximo de espera del POST
+      TRIGGER_TIMEOUT_SECONDS: "180"
+    restart: unless-stopped
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
 
 volumes:
-  postgres_data:  # Define named volume here, without any additional paths or spaces
+  postgres_data: # Define named volume here
