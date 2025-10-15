@@ -87,7 +87,7 @@ services:
     depends_on:
       - backend
     environment:
-      SCHEDULE_EVERY_SECONDS: "600" #PRUEBA CON 600s    
+      SCHEDULE_EVERY_SECONDS: "36000" #PRUEBA CON 600s    
       # endpoint interno del backend en la red de Docker
       BACKEND_TRIGGER_URL: "http://backend:8000/run-scrapers"
       # tiempo máximo de espera del POST
