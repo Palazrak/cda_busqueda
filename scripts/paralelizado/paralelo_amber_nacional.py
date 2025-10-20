@@ -229,11 +229,12 @@ def scrape_macro_parallel():
 def main():
     start_time = time.time()
     data_list = scrape_macro_parallel()
+    print(f"✅ Se encontraron {len(data_list)} fichas en el JSON (nacional).")
     extraction_date = datetime.date.today()
     source_url = "https://appalertaamber1.fgr.org.mx/Alerta/CarruselGB"
     insert_many_to_db(data_list, extraction_date, source_url)
-    end_time = time.time()
-    print(f"⏳ Tiempo total de ejecución: {end_time - start_time:.2f} segundos")
+    end_time = time.time() 
+    print(f"⏳ Tiempo total de ejecución(nacional): {end_time - start_time:.2f} segundos") #edit
 
 if __name__ == '__main__':
     main()
