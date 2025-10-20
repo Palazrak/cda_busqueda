@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Install system dependencies needed for lxml, boto3, fastapi, etc.
 RUN apt-get update && apt-get install -y \
+    wget \
     gcc \
     libxml2-dev \
     libxslt-dev \
