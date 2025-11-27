@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Instalar boto3
+RUN pip install boto3 psycopg2-binary requests lxml pandas
+
 # Copia el archivo de requisitos al contenedor
 COPY requirements.txt .
 
@@ -24,9 +27,10 @@ COPY requirements.txt .
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
 # Copia tu código Python
-COPY ./scripts/paralelizado/paralelo_havistoa_chiapas.py .
-COPY ./scripts/paralelizado/paralelo_amber_chiapas.py .
-COPY ./scripts/paralelizado/paralelo_amber_nacional.py .
+# COPY ./scripts/paralelizado/paralelo_havistoa_chiapas.py .
+# COPY ./scripts/paralelizado/paralelo_amber_chiapas.py .
+# COPY ./scripts/paralelizado/paralelo_amber_nacional.py .
+# COPY ./scripts/serial/serial_hasvistoa_michoacan.py .
 
 # Comando por defecto
-CMD python -u paralelo_havistoa_chiapas.py && python -u paralelo_amber_chiapas.py && python -u paralelo_amber_nacional.py
+# CMD python -u paralelo_havistoa_chiapas.py && python -u paralelo_amber_chiapas.py && python -u paralelo_amber_nacional.py && python -u serial_hasvistoa_michoacan.py
