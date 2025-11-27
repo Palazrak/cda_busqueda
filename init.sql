@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS public.desaparecidos (
     url_origen TEXT NOT NULL,
     fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     localizado BOOLEAN DEFAULT FALSE,
+    hashid TEXT NOT NULL,
     datos JSONB
 );
 
