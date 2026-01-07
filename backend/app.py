@@ -7,12 +7,6 @@ import json
 from dotenv import load_dotenv
 from typing import Optional
 
-#EDIT: imports mínimos para disparar scrapers sin bloquear la API
-import sys  #EDIT
-import subprocess  #EDIT
-import threading  #EDIT
-from pathlib import Path  #EDIT
-
 app = FastAPI()
 
 # Permitir CORS para que tu front pueda llamar a este API
@@ -96,36 +90,7 @@ async def busqueda_avanzada(
     return {"resultados": resultados}
 
 
-#EDIT: endpoint de salud simple para healthchecks
-@app.get("/healthz")  #EDIT
-def healthz():  #EDIT
-    return {"ok": True}  #EDIT
-
-#EDIT: función interna que lanza los scrapers sin bloquear la petición
-def _launch_scrapers_background():  #EDIT
-    """Lanza los scrapers necesarios en procesos independientes."""  #EDIT
-    #editt - lista actualizada de scripts que el scheduler debe disparar
-    candidate_cmds = [  
-        [sys.executable, "scripts/paralelizado/paralelo_amber_nacional.py"],  #editt
-        [sys.executable, "scripts/paralelizado/paralelo_havistoa_chiapas.py"], #editt
-        [sys.executable, "scripts/paralelizado/paralelo_amber_chiapas.py"],    #editt
-    ]  #editt
-
-    cwd = Path(".").resolve()
-    for cmd in candidate_cmds:
-        script_path = (cwd / cmd[-1]).resolve() if len(cmd) >= 2 else None
-        if script_path and script_path.exists():
-            try:
-                subprocess.Popen(cmd, cwd=str(cwd))
-                print(f"[backend] Lanzado scraper: {' '.join(cmd)}")
-            except Exception as e:
-                print(f"[backend] Error lanzando {' '.join(cmd)} :: {e}")
-        else:
-            print(f"[backend] No encontrado: {' '.join(cmd)}")
-
-#EDIT: endpoint que el scheduler invoca cada X minutos
-@app.post("/run-scrapers")  #EDIT
-def run_scrapers_endpoint():  #EDIT
-    t = threading.Thread(target=_launch_scrapers_background, daemon=True)  #EDIT
-    t.start()  #EDIT
-    return {"status": "accepted"}  #EDIT
+#edittt - Endpoint de salud (conservar para monitoring general)
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
