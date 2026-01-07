@@ -1,4 +1,4 @@
-version: "3.8" #editt
+version: "3.8"
 
 services:
   postgres:
@@ -15,7 +15,7 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql # Mount the SQL script for initialization
     networks:
       - app-network
-    restart: unless-stopped #editt
+    restart: unless-stopped
 
   scrapper:
     container_name: python_scrapper
@@ -46,7 +46,7 @@ services:
       - "3000:3000" # Expose PostgREST on port 3000
     networks:
       - app-network
-    restart: unless-stopped #editt
+    restart: unless-stopped
 
   frontend:
     container_name: nextjs_frontend
@@ -72,12 +72,13 @@ services:
       dockerfile: ./backend/Dockerfile
     ports:
       - "8000:8000"
-    healthcheck: #EDIT
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz > /dev/null"]
-      interval: 60s #EDIT
-      timeout: 5s #EDIT
-      retries: 6 #EDIT
-      start_period: 30s #EDIT
+    #edittt - ELIMINADO: healthcheck ya no es necesario para el scheduler
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz > /dev/null"]
+    #   interval: 60s
+    #   timeout: 5s
+    #   retries: 6
+    #   start_period: 30s
     depends_on:
       - postgrest
     networks:
@@ -86,28 +87,49 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=us-east-1
-      - PYTHONUNBUFFERED=1 #editt
-    working_dir: /app #editt
+      - PYTHONUNBUFFERED=1
+    working_dir: /app
     volumes:
-      - ./backend:/app #editt  # monta el código del backend (donde está app.py)
-      - ./scripts:/app/scripts:ro #editt  # monta tus scrapers para que /app/scripts exista
-    restart: unless-stopped #editt
-
-  scheduler:
-    build: ./scheduler
-    container_name: scheduler
-    depends_on:
-      backend: #editt
-        condition: service_healthy #editt
-    environment:
-      SCHEDULE_EVERY_SECONDS: "600" #PRUEBA CON 600s    
-      # endpoint interno del backend en la red de Docker
-      BACKEND_TRIGGER_URL: "http://backend:8000/run-scrapers"
-      # tiempo máximo de espera del POST
-      TRIGGER_TIMEOUT_SECONDS: "180"
+      - ./backend:/app #edittt - Solo backend, sin scripts
     restart: unless-stopped
+
+  #edittt - Scheduler completamente rediseñado
+  scheduler:
+    build: 
+      context: .
+      dockerfile: ./scheduler/Dockerfile
+    container_name: scheduler
+    #edittt - CAMBIO CRÍTICO: Ahora depende de postgres directamente, no de backend
+    depends_on:
+      - postgres
+    environment:
+      #edittt - ELIMINADO: Variables obsoletas del scheduler viejo
+      # SCHEDULE_EVERY_SECONDS: "600"
+      # BACKEND_TRIGGER_URL: "http://backend:8000/run-scrapers"
+      # TRIGGER_TIMEOUT_SECONDS: "180"
+      
+      #edittt - NUEVO: Variables para los scrapers (conexión a BD)
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=cda_busqueda
+      - DB_USER=postgres
+      - DB_PASSWORD=mysecretpassword
+    volumes:
+      #edittt - CRÍTICO: Montar scripts de scraping (read-only)
+      - ./scripts:/app/scripts:ro
+      #edittt - OPCIONAL: Montar config.yaml para override (read-only)
+      # Si no montas esto, usa el config.yaml copiado en la imagen
+      - ./scheduler/config.yaml:/app/config.yaml:ro
     networks:
       - app-network
+    restart: unless-stopped
+    #edittt - NUEVO: Logging para debugging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   app-network:

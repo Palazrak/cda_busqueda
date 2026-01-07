@@ -1,5 +1,135 @@
-# ./scheduler/requirements.txt
+#Archivo completo de dependencias del scheduler
 
-APScheduler==3.10.4
-requests==2.32.3
-pytz==2024.1
+# APScheduler - Motor de scheduling con jobs independientes
+# Usado en: scheduler.py
+# Funcionalidad: Disparar funciones periódicamente con intervalos dinámicos
+apscheduler==3.10.4
+
+# PyYAML - Parser de archivos YAML
+# Usado en: scheduler_config.py
+# Funcionalidad: Cargar config.yaml con parámetros de scrapers
+pyyaml==6.0.1
+
+# psutil - Información del sistema (CPU, RAM, procesos)
+# Usado en: scheduler_config.py, scraper_executor.py
+# Funcionalidad: Autodetección de cores/threads, monitoreo de recursos
+# OPCIONAL pero recomendado
+psutil==5.9.8
+
+# requests - Cliente HTTP
+# Usado en: Solo si necesitas hacer health checks HTTP (opcional)
+# NO se usa para disparar scrapers (ya no hay endpoint HTTP)
+# Pero los scrapers lo necesitan, así que lo incluimos
+requests==2.31.0
+
+# =============================================================================
+# DEPENDENCIAS DE LOS SCRAPERS
+# (Necesarias porque el scheduler ejecuta los scrapers directamente)
+# =============================================================================
+
+# beautifulsoup4 - Parser HTML/XML
+# Usado en: paralelo_amber_chiapas.py, paralelo_havistoa_chiapas.py, paralelo_amber_nacional.py
+# Funcionalidad: Extraer datos de páginas web
+beautifulsoup4==4.12.3
+
+# lxml - Parser rápido para BeautifulSoup
+# Usado en: Todos los scrapers (backend de BS4)
+# Funcionalidad: Parsing HTML más rápido que html.parser
+lxml==5.1.0
+
+# psycopg2-binary - Driver PostgreSQL
+# Usado en: Todos los scrapers
+# Funcionalidad: Insertar datos en la base de datos
+psycopg2-binary==2.9.9
+
+# PyMuPDF (fitz) - Procesamiento de PDFs
+# Usado en: paralelo_amber_nacional.py
+# Funcionalidad: Extraer texto de PDFs de alertas amber
+PyMuPDF==1.23.26
+
+# =============================================================================
+# DEPENDENCIAS OPCIONALES PERO RECOMENDADAS
+# =============================================================================
+
+# python-dotenv - Cargar variables de entorno desde .env
+# Útil para desarrollo local (en Docker se pasan directo)
+python-dotenv==1.0.1
+
+# =============================================================================
+# NOTAS DE VERSIONES
+# =============================================================================
+# 
+# ¿Por qué versiones específicas?
+# - Reproducibilidad: Mismo comportamiento en cualquier máquina
+# - Estabilidad: Evitar breaking changes de versiones nuevas
+# - Seguridad: Versiones conocidas sin vulnerabilidades críticas
+#
+# ¿Cuándo actualizar?
+# - Security patches: Actualizar inmediatamente
+# - Minor versions: Cada 3-6 meses
+# - Major versions: Evaluar breaking changes primero
+#
+# Verificar actualizaciones:
+#   pip list --outdated
+#
+# Actualizar todas (cuidado):
+#   pip install --upgrade -r requirements.txt
+#
+# =============================================================================
+# TAMAÑO DE IMAGEN DOCKER ESTIMADO
+# =============================================================================
+#
+# Base image (python:3.11-slim): ~130 MB
+# Dependencias:
+#   - APScheduler: ~2 MB
+#   - PyYAML: ~1 MB
+#   - psutil: ~500 KB
+#   - requests: ~5 MB
+#   - beautifulsoup4: ~500 KB
+#   - lxml: ~8 MB (compilada)
+#   - psycopg2-binary: ~3 MB
+#   - PyMuPDF: ~35 MB (incluye librerías C)
+#   - python-dotenv: ~100 KB
+#
+# Total estimado: ~185 MB (aceptable para un scheduler)
+#
+# Optimizaciones posibles:
+# 1. Usar alpine en lugar de slim (pero más complejo para compilar lxml/PyMuPDF)
+# 2. Multi-stage build (compilar en una imagen, copiar binarios a otra)
+# 3. Remover python-dotenv en producción (solo para dev)
+#
+# =============================================================================
+# COMPATIBILIDAD DE VERSIONES
+# =============================================================================
+#
+# Python requerido: 3.9+
+# Probado con: Python 3.11
+#
+# Sistema operativo:
+#   - Linux: ✅ Totalmente compatible
+#   - macOS: ✅ Compatible (puede requerir build tools para lxml)
+#   - Windows: ⚠️  psycopg2-binary puede fallar, usar psycopg2 + PostgreSQL instalado
+#
+# Arquitectura:
+#   - x86_64 (AMD64): ✅ Totalmente compatible
+#   - ARM64 (Apple Silicon, Raspberry Pi): ✅ Compatible con wheels precompilados
+#   - ARMv7 (Raspberry Pi antiguo): ⚠️  Puede requerir compilación
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+#
+# Error: "Could not find a version that satisfies the requirement"
+# Solución: pip install --upgrade pip
+#
+# Error: "Failed building wheel for lxml"
+# Solución (Debian/Ubuntu): apt-get install libxml2-dev libxslt-dev
+# Solución (Alpine): apk add libxml2-dev libxslt-dev
+#
+# Error: "pg_config executable not found"
+# Solución: Usar psycopg2-binary en lugar de psycopg2
+#
+# Error: "ModuleNotFoundError: No module named 'fitz'"
+# Solución: pip install PyMuPDF (no "fitz")
+#
+# =============================================================================

@@ -4,8 +4,4 @@ python-multipart
 boto3
 requests
 python-dotenv
-lxml
-beautifulsoup4
-pandas
-psycopg2-binary
-PyMuPDF
+
