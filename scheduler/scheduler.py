@@ -1,399 +1,537 @@
-#edittt - Archivo nuevo: Scheduler principal con APScheduler
 """
-Scheduler Principal - Orquestador de Scrapers
+Scheduler Principal - Orquestador de Scrapers con Worker Pool y Cola Pendiente.
 
-Este módulo:
-1. Carga configuración (config.yaml)
-2. Detecta capacidad de CPU
-3. Crea jobs independientes para cada scraper
-4. Aplica jitter log-normal a intervalos
-5. Reprograma dinámicamente después de cada ejecución
-6. Limpia procesos terminados periódicamente
-7. Maneja señales de shutdown gracefully
+Flujo por trigger de APScheduler:
+  1. ¿El scraper ya corre? → enqueue (FIFO), skip
+  2. Calcular n_shards según duración EMA y ratio respecto al más rápido
+  3. ¿Hay suficientes slots? → si no, enqueue, skip
+  4. Adquirir slots, lanzar shards, retornar (non-blocking)
 
-Ejemplo de ejecución:
-    python scheduler.py
-    
-    # Output:
-    # [Scheduler] INFO: 💻 CPU detectado: 4 cores, 8 threads, score=48/100
-    # [Scheduler] INFO: ✅ amber_chiapas programado cada ~12.5 min
-    # [Scheduler] INFO: ✅ havistoa_chiapas programado cada ~12.5 min
-    # [Scheduler] INFO: ✅ amber_nacional programado cada ~30.0 min
-    # [Scheduler] INFO: 🚀 Scheduler iniciado con 3 jobs activos
+Flujo del cleanup job (cada cleanup_interval_sec):
+  1. Matar scrapers stuck → liberar slots → registrar fallo
+  2. Detectar scrapers completados → liberar slots → actualizar EMA → reprogramar
+  3. Drenar cola FIFO (estricto): lanzar pendientes si hay slots
+  4. Imprimir dashboard de estado
 """
 
 import logging
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
-#edittt - Imports de nuestros módulos
 from scheduler_config import SchedulerConfig
 from jitter_calculator import calcular_intervalo_con_jitter, validar_config_jitter
 from scraper_executor import ScraperExecutor
+from worker_pool import WorkerPool
+from pending_queue import PendingQueue
+from stats_tracker import StatsTracker
+from shard_manager import ShardManager
 
-#edittt - Imports de APScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 
-#Configuración de logging
+# ──────────────────────────────────────────────────────────
+# Setup de logging
+# ──────────────────────────────────────────────────────────
+
 def setup_logging(log_level: str = "INFO"):
-    """
-    Configura el sistema de logging.
-    
-    Args:
-        log_level: Nivel de logging (DEBUG, INFO, WARNING, ERROR)
-    """
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
-    
     logging.basicConfig(
         level=numeric_level,
         format='[%(asctime)s] [%(name)s] %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        datefmt='%Y-%m-%d %H:%M:%S',
     )
-    
-    # Reducir verbosidad de APScheduler (muy ruidoso en DEBUG)
     logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 
-#Variables globales (instancias únicas)
+# ──────────────────────────────────────────────────────────
+# Instancias globales (inicializadas en initialize_scheduler)
+# ──────────────────────────────────────────────────────────
+
 config: SchedulerConfig = None
 executor: ScraperExecutor = None
 scheduler: BlockingScheduler = None
+worker_pool: WorkerPool = None
+pending_queue: PendingQueue = None
+stats_tracker: StatsTracker = None
+shard_manager: ShardManager = None
+
+# Contador para loggear dashboard periódico aunque no haya cambios
+_cleanup_call_count: int = 0
+DASHBOARD_EVERY_N_CLEANUPS: int = 5
 
 
-#Función para ejecutar un scraper específico
+# ──────────────────────────────────────────────────────────
+# Funciones de scheduling
+# ──────────────────────────────────────────────────────────
+
+def _get_reference_duration() -> float:
+    """
+    Duración de referencia = mínima duración EMA entre scrapers habilitados.
+    Usada para calcular el ratio de shards en modo auto.
+    """
+    durations = stats_tracker.get_all_durations()
+    if not durations:
+        return 60.0
+    return max(1.0, min(durations.values()))
+
+
+def _calculate_shards_for(scraper_name: str) -> int:
+    """Calcula cuántos shards necesita este scraper ahora."""
+    scraper_cfg = config.get_scraper_config(scraper_name) or {}
+    shard_cfg = config.get_shard_config(scraper_name)
+    effective_dur = (
+        stats_tracker.get_effective_duration(scraper_name)
+        or scraper_cfg.get('estimated_duration_sec', 60)
+    )
+    ref_dur = _get_reference_duration()
+    return shard_manager.resolve_shard_count(
+        scraper_name=scraper_name,
+        config_shards=shard_cfg['shards'],
+        effective_duration_sec=effective_dur,
+        reference_duration_sec=ref_dur,
+        max_shards=shard_cfg['max_shards'],
+    )
+
+
 def execute_scraper(scraper_name: str):
     """
-    Ejecuta un scraper y reprograma su próxima ejecución con jitter.
-    
-    Esta función es llamada por APScheduler según el intervalo configurado.
-    Después de ejecutar, recalcula el próximo intervalo con jitter y
-    reprograma el job.
-    
-    Args:
-        scraper_name: Nombre del scraper (ej: 'amber_chiapas')
+    Punto de entrada para el trigger de APScheduler.
+
+    Si el scraper está corriendo o no hay slots: encola y retorna.
+    Si hay slots: adquiere, lanza shards, retorna sin bloquear.
     """
     logger = logging.getLogger("Scheduler")
-    
-    #Verificar si el scraper ya está corriendo
+
+    # ── Guardia 1: ya está corriendo ────────────────────────────────
     if executor.is_running(scraper_name):
-        logger.warning(f"⏭️  {scraper_name} ya está en ejecución, skip")
+        pending_queue.enqueue(scraper_name)
+        stats_tracker.record_skip(scraper_name, "already_running")
+        logger.info(
+            f"⏭️  {scraper_name} en ejecución → encolado "
+            f"(cola: {pending_queue.peek_all()})"
+        )
         return
-    
-    #Obtener configuración del scraper
+
+    # ── Guardia 2: deshabilitado ─────────────────────────────────────
     scraper_cfg = config.get_scraper_config(scraper_name)
-    if not scraper_cfg:
-        logger.error(f"❌ Configuración de {scraper_name} no encontrada")
+    if not scraper_cfg or not scraper_cfg.get('enabled', True):
+        logger.info(f"⏸️  {scraper_name} deshabilitado, skip")
         return
-    
-    #Verificar que está habilitado
-    if not scraper_cfg.get('enabled', True):
-        logger.info(f"⏸️  {scraper_name} está deshabilitado, skip")
+
+    # ── Calcular shards ───────────────────────────────────────────────
+    n_shards = _calculate_shards_for(scraper_name)
+    shard_cfg = config.get_shard_config(scraper_name)
+
+    # ── Guardia 3: slots disponibles ─────────────────────────────────
+    if not worker_pool.acquire(scraper_name, n_shards):
+        pending_queue.enqueue(scraper_name)
+        stats_tracker.record_skip(scraper_name, "slots_full")
+        logger.info(
+            f"🚫 {scraper_name}: necesita {n_shards} slot(s), "
+            f"no disponibles → encolado | "
+            f"{worker_pool.format_status_line()} | "
+            f"cola: {pending_queue.peek_all()}"
+        )
         return
-    
-    #Ejecutar el scraper
-    logger.info(f"🚀 Disparando {scraper_name}")
-    start_time = time.time()
-    
-    success = executor.execute(
+
+    # ── Lanzar shards ─────────────────────────────────────────────────
+    shard_args_list = shard_manager.build_shard_args(
         scraper_name=scraper_name,
-        script_filename=scraper_cfg['script_filename']
+        shard_strategy=shard_cfg['shard_strategy'],
+        n_shards=n_shards,
     )
-    
+
+    success = executor.execute_shards(
+        scraper_name=scraper_name,
+        script_filename=scraper_cfg['script_filename'],
+        shard_args_list=shard_args_list,
+    )
+
     if not success:
-        logger.error(f"❌ No se pudo ejecutar {scraper_name}")
+        # Fallo al lanzar: liberar slots inmediatamente
+        worker_pool.release(scraper_name)
+        logger.error(f"❌ {scraper_name}: fallo al lanzar procesos")
         return
-    
-    execution_time = time.time() - start_time
-    logger.debug(f"⚡ {scraper_name} lanzado en {execution_time*1000:.0f}ms")
-    
-    #Reprogramar con nuevo intervalo (si dynamic_interval_recalculation=True)
-    if config.should_recalculate_intervals():
-        _reschedule_scraper(scraper_name)
+
+    logger.info(
+        f"🚀 {scraper_name} lanzado ({n_shards} shard(s)) | "
+        f"{worker_pool.format_status_line()}"
+    )
 
 
-#Función para reprogramar un scraper con jitter
+def _launch_from_queue(scraper_name: str):
+    """
+    Versión interna de execute_scraper para uso desde la cola pendiente.
+    Asume que la disponibilidad de slots ya fue verificada externamente.
+    No re-encola en caso de fallo (evita loops).
+    """
+    logger = logging.getLogger("Scheduler")
+
+    scraper_cfg = config.get_scraper_config(scraper_name)
+    if not scraper_cfg or not scraper_cfg.get('enabled', True):
+        logger.info(f"⏸️  {scraper_name} (cola) deshabilitado al intentar lanzar")
+        return
+
+    n_shards = _calculate_shards_for(scraper_name)
+    shard_cfg = config.get_shard_config(scraper_name)
+
+    if not worker_pool.acquire(scraper_name, n_shards):
+        # Slots ocupados (race condition entre threads); re-encolar para el próximo ciclo
+        pending_queue.enqueue(scraper_name)
+        logger.warning(
+            f"⚠️  {scraper_name} (cola): race condition en slots → re-encolado"
+        )
+        return
+
+    shard_args_list = shard_manager.build_shard_args(
+        scraper_name=scraper_name,
+        shard_strategy=shard_cfg['shard_strategy'],
+        n_shards=n_shards,
+    )
+    success = executor.execute_shards(
+        scraper_name=scraper_name,
+        script_filename=scraper_cfg['script_filename'],
+        shard_args_list=shard_args_list,
+    )
+    if not success:
+        worker_pool.release(scraper_name)
+        logger.error(f"❌ {scraper_name} (cola): fallo al lanzar procesos")
+        return
+
+    logger.info(
+        f"▶️  {scraper_name} ejecutado desde cola pendiente ({n_shards} shard(s)) | "
+        f"{worker_pool.format_status_line()}"
+    )
+
+
+def _try_drain_queue():
+    """
+    Intenta ejecutar items de la cola pendiente en orden FIFO estricto.
+
+    Solo avanza al siguiente si el frente de la cola tiene slots disponibles.
+    Esto preserva el FIFO: si el primero no cabe, los demás esperan.
+    """
+    logger = logging.getLogger("Scheduler")
+
+    while pending_queue.size() > 0:
+        front = pending_queue.peek_front()
+        if front is None:
+            break
+
+        # Verificar si ya está corriendo (puede haber cambiado desde que se encoló)
+        if executor.is_running(front):
+            # Sigue corriendo; dejar en cola para el próximo ciclo
+            break
+
+        n_shards = _calculate_shards_for(front)
+        if worker_pool.slots_free() < n_shards:
+            logger.debug(
+                f"📋 Cola: {front} necesita {n_shards} slots, "
+                f"solo {worker_pool.slots_free()} disponibles — esperando"
+            )
+            break  # FIFO estricto: no saltar al siguiente
+
+        # Dequeue y lanzar
+        dequeued = pending_queue.dequeue_one()
+        if dequeued:
+            logger.info(f"▶️  Drenando cola: {dequeued} ({pending_queue.size()} restantes)")
+            _launch_from_queue(dequeued)
+
+
 def _reschedule_scraper(scraper_name: str):
     """
-    Recalcula el intervalo con jitter y reprograma el job.
-    
-    Args:
-        scraper_name: Nombre del scraper
+    Recalcula el intervalo base usando duración EMA y reprograma el job.
+    El nuevo intervalo incorpora jitter log-normal.
     """
     logger = logging.getLogger("Scheduler")
-    
     try:
-        base_interval = config.calculate_base_interval(scraper_name)
-        
-        #Aplicar jitter
-        #EDITTT - Usar configuración de jitter efectiva por scraper (override local + fallback global)
+        # Usar duración EMA si disponible; si no, la del config
+        effective_dur = stats_tracker.get_effective_duration(scraper_name)
+        if effective_dur and effective_dur > 0:
+            base_interval = config.calculate_base_interval_from_duration(
+                scraper_name, effective_dur
+            )
+            logger.debug(
+                f"⏰ {scraper_name}: intervalo base recalculado con "
+                f"EMA={effective_dur:.0f}s → {base_interval:.2f}min"
+            )
+        else:
+            base_interval = config.calculate_base_interval(scraper_name)
+
         jitter_cfg = config.get_jitter_config(scraper_name)
         next_interval = calcular_intervalo_con_jitter(
             intervalo_base_min=base_interval,
             k=jitter_cfg['k'],
             min_factor=jitter_cfg['min_factor'],
             max_factor=jitter_cfg['max_factor'],
-            logger=logging.getLogger("JitterCalculator")
+            logger=logging.getLogger("JitterCalculator"),
         )
 
-        #Reprogramar job en APScheduler
-        job_id = f"job_{scraper_name}"
         scheduler.reschedule_job(
-            job_id=job_id,
+            job_id=f"job_{scraper_name}",
             trigger='interval',
-            minutes=next_interval
+            minutes=next_interval,
         )
-        
         logger.info(
-            f"⏰ {scraper_name} reprogramado: próxima ejecución en {next_interval:.2f} min"
+            f"⏰ {scraper_name} reprogramado: próxima en {next_interval:.2f}min "
+            f"(base={base_interval:.2f}min)"
         )
-        
     except Exception as e:
         logger.error(f"❌ Error reprogramando {scraper_name}: {e}", exc_info=True)
 
 
-#Funciones específicas para cada scraper (para APScheduler)
-def run_amber_chiapas():
-    """Job para scraper amber_chiapas."""
-    execute_scraper('amber_chiapas')
+# ──────────────────────────────────────────────────────────
+# Funciones de job para APScheduler (una por scraper)
+# ──────────────────────────────────────────────────────────
+# Se generan dinámicamente en initialize_scheduler() para
+# que nuevos scrapers en config.yaml no requieran cambios aquí.
+
+def _make_job_func(name: str):
+    def job():
+        execute_scraper(name)
+    job.__name__ = f"run_{name}"
+    return job
 
 
-def run_havistoa_chiapas():
-    """Job para scraper havistoa_chiapas."""
-    execute_scraper('havistoa_chiapas')
+# ──────────────────────────────────────────────────────────
+# Cleanup job
+# ──────────────────────────────────────────────────────────
 
-
-def run_amber_nacional():
-    """Job para scraper amber_nacional."""
-    execute_scraper('amber_nacional')
-
-
-#Mapeo de scrapers a funciones
-SCRAPER_FUNCTIONS = {
-    'amber_chiapas': run_amber_chiapas,
-    'havistoa_chiapas': run_havistoa_chiapas,
-    'amber_nacional': run_amber_nacional
-}
-
-
-#Función de limpieza periódica
 def cleanup_finished_processes():
     """
-    Job periódico que limpia procesos terminados.
-    Ejecutado por APScheduler cada X segundos.
+    Job periódico que:
+      1. Mata scrapers stuck → libera slots → registra fallo
+      2. Detecta scrapers completados → libera slots → actualiza EMA → reprograma
+      3. Drena la cola FIFO
+      4. Loggea dashboard de estado
     """
+    global _cleanup_call_count
+    _cleanup_call_count += 1
     logger = logging.getLogger("Scheduler")
-    
-    cleaned_count = executor.cleanup_finished()
-    
-    if cleaned_count > 0:
-        logger.debug(f"🧹 Limpiados {cleaned_count} procesos terminados")
-    
-    #edittt - Verificar scrapers atascados (stuck)
-    active_scrapers = executor.get_active_scrapers()
-    for scraper_name in active_scrapers:
+
+    ended_scrapers = []   # scrapers que terminaron en este ciclo (stuck o natural)
+
+    # ── Fase 1: Detectar y matar stuck ───────────────────────────────
+    for scraper_name in executor.get_active_scrapers():
         if executor.is_stuck(scraper_name):
-            uptime = executor.get_uptime(scraper_name)
-            timeout = executor.timeout_sec
+            uptime = executor.get_uptime(scraper_name) or 0
             logger.warning(
-                f"⚠️  {scraper_name} posiblemente atascado "
-                f"(corriendo {uptime:.0f}s, timeout={timeout}s)"
+                f"💀 {scraper_name} ATASCADO ({uptime:.0f}s ≥ "
+                f"{executor.timeout_sec}s) → matando y liberando slots"
             )
+            executor.kill_scraper(scraper_name, force=True)
+            worker_pool.release(scraper_name)
+            stats_tracker.record_stuck(scraper_name)
+            ended_scrapers.append(scraper_name)
+
+    # ── Fase 2: Cleanup de procesos terminados naturalmente ───────────
+    completed = executor.cleanup_finished()
+    # completed = list of (scraper_name, duration_sec, success)
+
+    for scraper_name, duration, success in completed:
+        worker_pool.release(scraper_name)
+        stats_tracker.record_run(scraper_name, duration, success)
+        ended_scrapers.append(scraper_name)
+
+    # ── Fase 3: Reprogramar los que terminaron ────────────────────────
+    if config.should_recalculate_intervals():
+        for scraper_name in ended_scrapers:
+            _reschedule_scraper(scraper_name)
+
+    # ── Fase 4: Drenar cola FIFO ──────────────────────────────────────
+    if ended_scrapers or pending_queue.size() > 0:
+        _try_drain_queue()
+
+    # ── Fase 5: Dashboard de estado ───────────────────────────────────
+    should_log = (
+        ended_scrapers
+        or pending_queue.size() > 0
+        or (_cleanup_call_count % DASHBOARD_EVERY_N_CLEANUPS == 0)
+    )
+    if should_log:
+        _log_dashboard()
 
 
-#edittt - Listener de eventos de APScheduler
-def job_listener(event):
-    """
-    Listener de eventos de APScheduler para logging adicional.
-    
-    Args:
-        event: Evento de APScheduler (JOB_EXECUTED, JOB_ERROR, etc.)
-    """
+def _log_dashboard():
+    """Imprime una línea de estado del sistema completo."""
     logger = logging.getLogger("Scheduler")
-    
+    pool_status = worker_pool.get_status()
+    pending = pending_queue.peek_all()
+    active = executor.get_active_scrapers()
+
+    # Calcular uptimes de activos
+    active_str_parts = []
+    for name in active:
+        uptime = executor.get_uptime(name) or 0
+        info = executor.active_processes.get(name, {})
+        n_shards = info.get('n_shards', 1)
+        active_str_parts.append(f"{name}({n_shards}sh/{uptime:.0f}s)")
+
+    pool_line = worker_pool.format_status_line()
+    pending_line = f"[Cola: {pending}]" if pending else "[Cola: vacía]"
+    active_line = f"[Activos: {', '.join(active_str_parts)}]" if active_str_parts else "[Activos: ninguno]"
+
+    logger.info(f"📊 {pool_line} {active_line} {pending_line}")
+
+    # Stats completos (solo periódicamente para no saturar logs)
+    if _cleanup_call_count % DASHBOARD_EVERY_N_CLEANUPS == 0:
+        stats_tracker.log_summary()
+
+
+# ──────────────────────────────────────────────────────────
+# Listener de APScheduler
+# ──────────────────────────────────────────────────────────
+
+def job_listener(event):
+    logger = logging.getLogger("Scheduler")
     if event.exception:
         logger.error(
-            f"❌ Job {event.job_id} falló con excepción: {event.exception}",
-            exc_info=True
+            f"❌ Job {event.job_id} lanzó excepción: {event.exception}",
+            exc_info=True,
         )
-    else:
-        logger.debug(f"✅ Job {event.job_id} ejecutado exitosamente")
 
 
-#edittt - Manejador de señales para shutdown graceful
+# ──────────────────────────────────────────────────────────
+# Signal handler
+# ──────────────────────────────────────────────────────────
+
 def signal_handler(sig, frame):
-    """
-    Maneja señales SIGINT (Ctrl+C) y SIGTERM (docker stop) para shutdown graceful.
-    
-    Args:
-        sig: Número de señal
-        frame: Frame actual
-    """
     logger = logging.getLogger("Scheduler")
-    
-    signal_names = {
-        signal.SIGINT: "SIGINT (Ctrl+C)",
-        signal.SIGTERM: "SIGTERM"
-    }
-    signal_name = signal_names.get(sig, f"Signal {sig}")
-    
-    logger.info(f"🛑 {signal_name} recibido, iniciando shutdown graceful...")
-    
-    #edittt - Detener scheduler (no acepta nuevos jobs)
+    names = {signal.SIGINT: "SIGINT (Ctrl+C)", signal.SIGTERM: "SIGTERM"}
+    logger.info(f"🛑 {names.get(sig, sig)} recibido → shutdown graceful")
+
     if scheduler and scheduler.running:
-        logger.info("⏸️  Deteniendo scheduler...")
         scheduler.shutdown(wait=False)
-    
-    #edittt - Dar chance a scrapers de terminar (hasta 30 segundos)
-    active_scrapers = executor.get_active_scrapers()
-    if active_scrapers:
-        logger.info(f"⏳ Esperando a {len(active_scrapers)} scraper(s) activo(s)...")
-        logger.info(f"   Scrapers: {', '.join(active_scrapers)}")
-        
-        # Esperar hasta 30 segundos
-        wait_time = 30
-        for i in range(wait_time):
-            active_scrapers = executor.get_active_scrapers()
-            if not active_scrapers:
-                logger.info("✅ Todos los scrapers terminaron")
+
+    active = executor.get_active_scrapers()
+    if active:
+        logger.info(f"⏳ Esperando scrapers activos: {active}")
+        for _ in range(30):
+            if not executor.get_active_scrapers():
                 break
             time.sleep(1)
         else:
-            # Timeout alcanzado, forzar kill
-            logger.warning(f"⏱️  Timeout de {wait_time}s alcanzado, terminando scrapers forzadamente...")
             killed = executor.kill_all(force=True)
-            logger.warning(f"🔪 {killed} scraper(s) terminados forzadamente")
-    
-    #edittt - Mostrar estadísticas finales
+            logger.warning(f"⏱️  Timeout: {killed} scraper(s) matados forzadamente")
+
     logger.info("📊 Estadísticas finales:")
-    all_stats = executor.get_all_stats()
-    for scraper_name, stats in all_stats.items():
+    for name, stats in executor.get_all_stats().items():
         logger.info(
-            f"   {scraper_name}: {stats['successful_runs']}/{stats['total_runs']} exitosas, "
-            f"avg={stats.get('avg_duration', 0):.1f}s"
+            f"   {name}: {stats.get('successful_runs', 0)}/"
+            f"{stats.get('total_runs', 0)} exitosas, "
+            f"avg={stats.get('avg_duration', 0) or 0:.1f}s"
         )
-    
-    logger.info("👋 Scheduler detenido exitosamente")
+
+    logger.info("👋 Scheduler detenido")
     sys.exit(0)
 
 
-#edittt - Función principal de inicialización
+# ──────────────────────────────────────────────────────────
+# Inicialización
+# ──────────────────────────────────────────────────────────
+
 def initialize_scheduler():
-    """
-    Inicializa el scheduler con toda la configuración.
-    
-    Returns:
-        BlockingScheduler configurado
-    """
-    global config, executor, scheduler
-    
+    global config, executor, scheduler, worker_pool, pending_queue
+    global stats_tracker, shard_manager
+
     logger = logging.getLogger("Scheduler")
-    
-    #1. Cargar configuración
+
+    # 1. Config
     logger.info("🔧 Cargando configuración...")
     config = SchedulerConfig("config.yaml")
-    
-    #2. Mostrar info de CPU detectada
+
     cpu_info = config.get_machine_capacity()
     logger.info(
-        f"💻 CPU detectado: {cpu_info['cores']} cores, "
+        f"💻 CPU: {cpu_info['cores']} cores, "
         f"{cpu_info['threads']} threads, "
         f"score={cpu_info['performance_score']}/100"
     )
-    
-    #3. Validar configuración de jitter
-    #EDITTT - Validar jitter GLOBAL (fallback). El jitter por scraper se valida en SchedulerConfig.
-    jitter_cfg_global = config.config['jitter']  # EDITTT (antes jitter_cfg)
-    es_valido, mensaje = validar_config_jitter(
-        jitter_cfg_global['k'],
-        jitter_cfg_global['min_factor'],
-        jitter_cfg_global['max_factor']
+
+    # 2. Validar jitter global
+    jitter_global = config.config['jitter']
+    ok, msg = validar_config_jitter(
+        jitter_global['k'], jitter_global['min_factor'], jitter_global['max_factor']
     )
-    if not es_valido:
-        logger.error(f"❌ Configuración de jitter GLOBAL inválida: {mensaje}")
-        logger.error("   Usando valores por defecto seguros")
-        #EDITTT - Ajuste explícito sobre jitter global
-        jitter_cfg_global['k'] = 2
-        jitter_cfg_global['min_factor'] = 0.5
-        jitter_cfg_global['max_factor'] = 2.2
+    if not ok:
+        logger.error(f"❌ Jitter global inválido: {msg} → usando defaults")
+        jitter_global.update({'k': 2, 'min_factor': 0.5, 'max_factor': 2.2})
     else:
         logger.info(
-            f"✅ Jitter GLOBAL configurado: "
-            f"k={jitter_cfg_global['k']}, "
-            f"rango=[{jitter_cfg_global['min_factor']}x, {jitter_cfg_global['max_factor']}x]"
+            f"✅ Jitter global: k={jitter_global['k']}, "
+            f"rango=[{jitter_global['min_factor']}x, {jitter_global['max_factor']}x]"
         )
-    #4. Inicializar executor
-    logger.info("🔧 Inicializando executor de scrapers...")
+
+    # 3. Módulos nuevos
+    max_workers = config.get_max_total_workers()
+    logger.info(f"🔧 max_total_workers={max_workers}")
+
+    worker_pool = WorkerPool(max_workers=max_workers)
+    pending_queue = PendingQueue()
+    stats_tracker = StatsTracker()
+    shard_manager = ShardManager()
+
+    # 4. Executor
     executor = ScraperExecutor(
         scripts_dir="/app/scripts/paralelizado",
-        timeout_sec=config.get_scraper_timeout()
+        timeout_sec=config.get_scraper_timeout(),
     )
-    
-    #5. Configurar APScheduler
-    logger.info("🔧 Configurando APScheduler...")
-    
-    executors = {
-        'default': ThreadPoolExecutor(max_workers=10)
-    }
-    
+
+    # 5. Registrar scrapers en StatsTracker (seed = duración del config)
+    for name in config.get_enabled_scrapers():
+        scraper_cfg = config.get_scraper_config(name)
+        seed_dur = scraper_cfg.get('estimated_duration_sec', 60)
+        stats_tracker.register(name, seed_dur)
+        logger.info(
+            f"📊 {name} registrado: seed={seed_dur}s, "
+            f"shard_cfg={config.get_shard_config(name)}"
+        )
+
+    # 6. APScheduler
+    aps_executors = {'default': ThreadPoolExecutor(max_workers=10)}
     job_defaults = {
-        'coalesce': False,      # No combinar ejecuciones perdidas
-        'max_instances': 1,     # Solo 1 instancia por job
-        'misfire_grace_time': 30  # 30s de gracia si se retrasa
+        'coalesce': False,
+        'max_instances': 1,
+        'misfire_grace_time': 30,
     }
-    
     scheduler = BlockingScheduler(
-        executors=executors,
-        job_defaults=job_defaults
+        executors=aps_executors,
+        job_defaults=job_defaults,
     )
-    
-    #6. Agregar listener de eventos
     scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
-    
-    #7. Programar scrapers habilitados
-    enabled_scrapers = config.get_enabled_scrapers()
-    logger.info(f"📋 Scrapers habilitados: {', '.join(enabled_scrapers)}")
-    
-    for scraper_name in enabled_scrapers:
-        #Verificar que tenemos función para este scraper
-        if scraper_name not in SCRAPER_FUNCTIONS:
-            logger.error(f"❌ No hay función definida para {scraper_name}, skip")
-            continue
-        
-        #Calcular intervalo inicial
+
+    # 7. Programar scrapers habilitados (funciones generadas dinámicamente)
+    enabled = config.get_enabled_scrapers()
+    logger.info(f"📋 Scrapers habilitados: {', '.join(enabled)}")
+
+    for scraper_name in enabled:
         base_interval = config.calculate_base_interval(scraper_name)
-        
-        #Aplicar jitter al primer intervalo
-        #EDITTT - Usar jitter efectivo específico para cada scraper
-        jitter_cfg_scraper = config.get_jitter_config(scraper_name)
+        jitter_cfg = config.get_jitter_config(scraper_name)
         initial_interval = calcular_intervalo_con_jitter(
             intervalo_base_min=base_interval,
-            k=jitter_cfg_scraper['k'],
-            min_factor=jitter_cfg_scraper['min_factor'],
-            max_factor=jitter_cfg_scraper['max_factor']
+            k=jitter_cfg['k'],
+            min_factor=jitter_cfg['min_factor'],
+            max_factor=jitter_cfg['max_factor'],
         )
-        
-        #Agregar job a APScheduler
-        job_func = SCRAPER_FUNCTIONS[scraper_name]
+        shard_info = config.get_shard_config(scraper_name)
         scheduler.add_job(
-            func=job_func,
+            func=_make_job_func(scraper_name),
             trigger='interval',
             minutes=initial_interval,
             id=f"job_{scraper_name}",
             name=scraper_name,
-            max_instances=1
+            max_instances=1,
         )
-        
         logger.info(
-            f"✅ {scraper_name} programado: primera ejecución en {initial_interval:.2f} min, "
-            f"luego cada ~{base_interval:.2f} min (±jitter)"
+            f"✅ {scraper_name} programado: primera en {initial_interval:.2f}min, "
+            f"base~{base_interval:.2f}min | "
+            f"shards_cfg={shard_info}"
         )
-    
-    #edittt - 8. Agregar job de limpieza periódica
+
+    # 8. Job de limpieza
     cleanup_interval = config.get_cleanup_interval()
     scheduler.add_job(
         func=cleanup_finished_processes,
@@ -401,107 +539,49 @@ def initialize_scheduler():
         seconds=cleanup_interval,
         id='job_cleanup',
         name='cleanup',
-        max_instances=1
+        max_instances=1,
     )
-    logger.info(f"✅ Limpieza periódica programada cada {cleanup_interval}s")
-    
+    logger.info(f"✅ Cleanup programado cada {cleanup_interval}s")
+
     return scheduler
 
 
-#Función principal
+# ──────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────
+
 def main():
-    #1. Configurar logging
-    log_config = SchedulerConfig("config.yaml").get_logging_config()
-    setup_logging(log_config.get('level', 'INFO'))
-    
+    log_cfg = SchedulerConfig("config.yaml").get_logging_config()
+    setup_logging(log_cfg.get('level', 'INFO'))
+
     logger = logging.getLogger("Scheduler")
-    
-    #2. Mostrar banner
-    logger.info("="*70)
+    logger.info("=" * 70)
     logger.info("🤖 SCHEDULER DE SCRAPERS - CDA BÚSQUEDA")
-    logger.info("="*70)
+    logger.info("=" * 70)
     logger.info(f"🕐 Inicio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("="*70)
-    
-    #3. Registrar manejadores de señales
+    logger.info("=" * 70)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    logger.info("✅ Manejadores de señales registrados (Ctrl+C para detener)")
-    
-    #4. Inicializar scheduler
+
+    global scheduler
     try:
-        global scheduler
         scheduler = initialize_scheduler()
     except Exception as e:
-        logger.critical(f"❌ Error inicializando scheduler: {e}", exc_info=True)
+        logger.critical(f"❌ Error inicializando: {e}", exc_info=True)
         sys.exit(1)
-    
-    #5. Mostrar resumen pre-inicio
-    logger.info("="*70)
-    logger.info("📊 RESUMEN DE CONFIGURACIÓN")
-    logger.info("="*70)
-    
-    jobs = scheduler.get_jobs()
-    scraper_jobs = [j for j in jobs if j.id.startswith('job_') and j.id != 'job_cleanup']
-    
-    logger.info(f"Total de scrapers programados: {len(scraper_jobs)}")
 
-    for job in scraper_jobs:
-        try:
-            # Intentar obtener next_run_time (APScheduler 3.x)
-            trigger = job.trigger
-            if hasattr(trigger, 'run_date'):
-                # Trigger tipo 'date'
-                next_run = trigger.run_date
-            else:
-                # Trigger tipo 'interval' o 'cron'
-                # Calcular manualmente la próxima ejecución
-                if hasattr(job, '_scheduler') and hasattr(job._scheduler, '_real_add_job'):
-                    # Job ya fue agregado, calcular próxima ejecución
-                    now = datetime.now(job.trigger.timezone if hasattr(job.trigger, 'timezone') else None)
-                    next_run = now + timedelta(minutes=job.trigger.interval.total_seconds()/60 if hasattr(job.trigger, 'interval') else 0)
-                else:
-                    next_run = None
-            
-            if next_run:
-                logger.info(f"  • {job.name}: próxima ejecución a las {next_run.strftime('%H:%M:%S')}")
-            else:
-                logger.info(f"  • {job.name}: programado")
-        except Exception as e:
-            # Si todo falla, mostrar info básica
-            logger.info(f"  • {job.name}: programado (próxima ejecución no disponible)")
-    
-    #SOLUCIÓN MÁS SIMPLE (más ligera, menos visible en logs)
-    # for job in scraper_jobs:
-    # # En algunas versiones de APScheduler, next_run_time puede no existir o no estar inicializado
-    # next_run = getattr(job, "next_run_time", None)
+    logger.info("🚀 Scheduler iniciado (Ctrl+C para detener)")
+    logger.info("=" * 70)
 
-    # if next_run is None:
-    #     logger.info(f"  • {job.name}: próxima ejecución programada (hora exacta no disponible)")
-    # else:
-    #     try:
-    #         logger.info(
-    #             f"  • {job.name}: próxima ejecución a las {next_run.strftime('%H:%M:%S')}"
-    #         )
-    #     except Exception:
-    #         logger.info(
-    #             f"  • {job.name}: próxima ejecución en {next_run}"
-    #         )
-
-    logger.info("="*70)
-    
-    #6. Iniciar scheduler (bloquea aquí)
-    logger.info("🚀 Iniciando scheduler... (presiona Ctrl+C para detener)")
-    logger.info("="*70)
-    
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        # Esto normalmente no se alcanza porque signal_handler maneja las señales
         pass
     except Exception as e:
-        logger.critical(f"❌ Error fatal en scheduler: {e}", exc_info=True)
+        logger.critical(f"❌ Error fatal: {e}", exc_info=True)
         sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

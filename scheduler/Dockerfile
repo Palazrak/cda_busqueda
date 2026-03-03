@@ -51,6 +51,10 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r /a
 COPY scheduler/scheduler_config.py ${APP_HOME}/
 COPY scheduler/jitter_calculator.py ${APP_HOME}/
 COPY scheduler/scraper_executor.py ${APP_HOME}/
+COPY scheduler/worker_pool.py ${APP_HOME}/
+COPY scheduler/pending_queue.py ${APP_HOME}/
+COPY scheduler/stats_tracker.py ${APP_HOME}/
+COPY scheduler/shard_manager.py ${APP_HOME}/
 COPY scheduler/scheduler.py ${APP_HOME}/
 COPY scheduler/config.yaml ${APP_HOME}/config.yaml
 
@@ -131,13 +135,6 @@ CMD ["python", "scheduler.py"]
 # Solución: Montar scripts como volumen
 #   volumes:
 #     - ./scripts:/app/scripts:ro
-#
 # Problema: "Permission denied" al escribir logs
 # Solución: El scheduler solo escribe a stdout (Docker captura logs)
 #   No necesita permisos de escritura en disco
-#
-# Problema: Health check falla
-# Solución: Verificar que scheduler.py está corriendo
-#   docker exec scheduler ps aux | grep scheduler.py
-#
-# =============================================================================

@@ -9,6 +9,7 @@ import base64
 import time
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse #NUEVO
 
 # Configuración de la base de datos
 DB_NAME = "cda_busqueda"
@@ -211,30 +212,85 @@ def scrape_page(id_estado):
         pass
     return results
 
-def scrape_macro_parallel():
-    """Procesa las páginas en paralelo. Cada thread obtiene su propia lista de resultados y, al finalizar,
-    se unen todos en una única lista."""
-    # Iteramos sobre los estados: 0 y del 2 al 33
-    estados_ids = [0] + list(range(2, 34))
+# def scrape_macro_parallel():
+#     """Procesa las páginas en paralelo. Cada thread obtiene su propia lista de resultados y, al finalizar,
+#     se unen todos en una única lista."""
+#     # Iteramos sobre los estados: 0 y del 2 al 33
+#     estados_ids = [0] + list(range(2, 34))
+#     all_data = []
+#     max_workers = max(24, multiprocessing.cpu_count() * 2)
+#     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+#         futures = {executor.submit(scrape_page, id_estado): id_estado for id_estado in estados_ids}
+#         for future in as_completed(futures):
+#             data = future.result()
+#             if data:
+#                 all_data.extend(data)
+#     return all_data
+
+def scrape_macro_parallel(estados_override=None):
+    """
+    Procesa las páginas en paralelo.
+
+    Args:
+        estados_override: Lista de IDs de estado a procesar.
+                          Si es None, procesa todos (comportamiento original).
+    """
+    if estados_override is not None:
+        estados_ids = estados_override
+    else:
+        estados_ids = [0] + list(range(2, 34))  # comportamiento original
+
     all_data = []
     max_workers = max(24, multiprocessing.cpu_count() * 2)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(scrape_page, id_estado): id_estado for id_estado in estados_ids}
+        futures = {
+            executor.submit(scrape_page, id_estado): id_estado
+            for id_estado in estados_ids
+        }
         for future in as_completed(futures):
             data = future.result()
             if data:
                 all_data.extend(data)
     return all_data
 
+# def main():
+#     start_time = time.time()
+#     data_list = scrape_macro_parallel()
+#     print(f"✅ Se encontraron {len(data_list)} fichas en el JSON (nacional).")
+#     extraction_date = datetime.date.today()
+#     source_url = "https://appalertaamber1.fgr.org.mx/Alerta/CarruselGB"
+#     insert_many_to_db(data_list, extraction_date, source_url)
+#     end_time = time.time() 
+#     print(f"⏳ Tiempo total de ejecución(nacional): {end_time - start_time:.2f} segundos") #edit
+
 def main():
+    # Parsear argumentos de sharding (pasados por ShardManager)
+    parser = argparse.ArgumentParser(description="Amber Nacional Scraper")
+    parser.add_argument(
+        '--states',
+        type=str,
+        default=None,
+        help='IDs de estados a procesar, separados por coma. '
+             'Ej: "0,2,3,6,7". Si no se pasa, procesa todos.'
+    )
+    args = parser.parse_args()
+
+    estados_a_procesar = None
+    if args.states:
+        try:
+            estados_a_procesar = [int(s.strip()) for s in args.states.split(',') if s.strip()]
+            print(f"🔀 Shard mode: procesando {len(estados_a_procesar)} estados: {estados_a_procesar}")
+        except ValueError as e:
+            parser.error(f"valor inválido para --states '{args.states}': {e}")
+
     start_time = time.time()
-    data_list = scrape_macro_parallel()
-    print(f"✅ Se encontraron {len(data_list)} fichas en el JSON (nacional).")
+    data_list = scrape_macro_parallel(estados_override=estados_a_procesar)
+    print(f"✅ Se encontraron {len(data_list)} fichas.")
     extraction_date = datetime.date.today()
     source_url = "https://appalertaamber1.fgr.org.mx/Alerta/CarruselGB"
     insert_many_to_db(data_list, extraction_date, source_url)
-    end_time = time.time() 
-    print(f"⏳ Tiempo total de ejecución(nacional): {end_time - start_time:.2f} segundos") #edit
+    end_time = time.time()
+    print(f"⏳ Tiempo total (nacional): {end_time - start_time:.2f}s")
 
 if __name__ == '__main__':
     main()

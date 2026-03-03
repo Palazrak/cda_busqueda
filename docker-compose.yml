@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   postgres:
-    image: postgres:18
+    image: postgres:18 #se sugiere usar 18 y no latest para que el codigo se mantenga mejor
     container_name: postgres
     ports:
       - "5432:5432"
@@ -13,6 +13,7 @@ services:
       PGDATA: /var/lib/postgresql/data/18/docker
     volumes:
       - postgres_data:/var/lib/postgresql/data # Named volume for persistent data
+      #tuve que modificar el volumen debido a que postgres 18 requiere otra dirección
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # Mount the SQL script for initialization
     networks:
       - app-network

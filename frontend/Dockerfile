@@ -20,4 +20,4 @@ RUN npm run build
 EXPOSE 3001
 
 # Comando para iniciar la aplicación
-CMD ["npm", "start"]
+CMD ["node", ".next/standalone/server.js"]

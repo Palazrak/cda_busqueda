@@ -1,35 +1,23 @@
-#edittt - Archivo nuevo: Ejecutor robusto de scrapers con subprocess
 """
-Scraper Executor - Gestión de Ejecución de Scrapers
+Scraper Executor - Gestión de ejecución multi-shard de scrapers.
 
-Este módulo maneja:
-1. Ejecución de scrapers vía subprocess.Popen (non-blocking)
-2. Tracking de procesos activos (evitar duplicados)
-3. Limpieza de procesos terminados (evitar zombies)
-4. Estadísticas de ejecución (duración, exit codes)
-5. Logging detallado para observabilidad
-
-Ejemplo de uso:
-    executor = ScraperExecutor("/app/scripts/paralelizado")
-    
-    # Verificar si ya está corriendo
-    if not executor.is_running('amber_chiapas'):
-        executor.execute('amber_chiapas', 'paralelo_amber_chiapas.py')
-    
-    # Limpiar procesos terminados
-    executor.cleanup_finished()
-    
-    # Obtener estadísticas
-    stats = executor.get_stats('amber_chiapas')
+Cambios respecto a la versión anterior:
+- active_processes ahora almacena LISTAS de shards por scraper
+- execute_shards() lanza N procesos en paralelo para un mismo scraper
+- cleanup_finished() retorna lista de (nombre, duración_total, éxito)
+  cuando TODOS los shards de un scraper terminaron
+- is_stuck() y kill_scraper() operan sobre todos los shards del scraper
+- kill_scraper() NO llama a cleanup_finished() internamente (lo hace el caller)
 """
 
 import subprocess
 import logging
 import time
 import sys
+import os
 from pathlib import Path
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
 
 try:
     import psutil
@@ -38,521 +26,397 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 
-#edittt - Clase principal para ejecutar scrapers
 class ScraperExecutor:
     """
-    Gestor de ejecución de scrapers con control de procesos.
-    
-    Responsabilidades:
-    - Ejecutar scrapers como subprocesos independientes
-    - Mantener registro de procesos activos
-    - Evitar ejecuciones duplicadas del mismo scraper
-    - Recolectar estadísticas de ejecución
-    - Limpiar procesos zombies
+    Gestor de ejecución de scrapers con soporte multi-shard.
+
+    Estructura de active_processes:
+    {
+        "amber_nacional": {
+            "shards": [
+                {"process": Popen, "shard_id": 0, "pid": 123,
+                 "extra_args": ["--states", "0,2,3,..."], "start_time": 1234.0},
+                {"process": Popen, "shard_id": 1, "pid": 124,
+                 "extra_args": ["--states", "17,18,..."], "start_time": 1234.1},
+            ],
+            "start_time": 1234.0,        # tiempo del primer shard
+            "script_filename": "paralelo_amber_nacional.py",
+            "n_shards": 2,
+        }
+    }
     """
-    
+
     def __init__(
         self,
         scripts_dir: str = "/app/scripts/paralelizado",
-        timeout_sec: Optional[int] = 900
+        timeout_sec: Optional[int] = 900,
     ):
-        """
-        Inicializa el executor de scrapers.
-        
-        Args:
-            scripts_dir: Directorio donde están los scripts de scraping
-            timeout_sec: Timeout máximo para un scraper (None = sin límite)
-        """
         self.scripts_dir = Path(scripts_dir)
         self.timeout_sec = timeout_sec
         self.logger = logging.getLogger("ScraperExecutor")
-        
-        #edittt - Diccionario de procesos activos
-        # Estructura: {scraper_name: {process, start_time, script_filename}}
+
+        # Procesos activos por scraper
         self.active_processes: Dict[str, Dict[str, Any]] = {}
-        
-        #edittt - Diccionario de estadísticas de ejecución
-        # Estructura: {scraper_name: {last_start, last_duration, last_exit_code, total_runs, ...}}
+
+        # Estadísticas de ejecución (compatibilidad con scheduler.py existente)
         self.execution_stats: Dict[str, Dict[str, Any]] = {}
-        
-        #edittt - Validar que el directorio de scripts existe
+
         if not self.scripts_dir.exists():
             self.logger.warning(
                 f"⚠️  Directorio de scripts no existe: {self.scripts_dir}"
             )
-        
-        self.logger.info(f"✅ ScraperExecutor inicializado (scripts_dir={scripts_dir})")
-    
-    def is_running(self, scraper_name: str) -> bool:
+
+        self.logger.info(
+            f"✅ ScraperExecutor inicializado "
+            f"(scripts_dir={scripts_dir}, timeout={timeout_sec}s)"
+        )
+
+    # ------------------------------------------------------------------
+    # Lanzamiento de procesos
+    # ------------------------------------------------------------------
+
+    def execute_shards(
+        self,
+        scraper_name: str,
+        script_filename: str,
+        shard_args_list: List[List[str]],
+        env_vars: Optional[Dict[str, str]] = None,
+    ) -> bool:
         """
-        Verifica si un scraper está actualmente en ejecución.
-        
+        Lanza N shards del scraper como subprocesos independientes.
+
         Args:
-            scraper_name: Nombre del scraper (ej: 'amber_chiapas')
-        
+            scraper_name:    Nombre identificador del scraper.
+            script_filename: Archivo Python a ejecutar.
+            shard_args_list: Lista de listas de args, una por shard.
+                             [[]] para scraper sin sharding.
+            env_vars:        Variables de entorno adicionales.
+
         Returns:
-            True si el scraper está corriendo, False si no
+            True si todos los shards se lanzaron correctamente.
+            False si el scraper ya está corriendo o hubo error.
         """
-        if scraper_name not in self.active_processes:
+        if self.is_running(scraper_name):
+            self.logger.warning(f"⏭️  {scraper_name} ya está en ejecución, skip")
             return False
-        
-        process_info = self.active_processes[scraper_name]
-        process = process_info['process']
-        
-        #edittt - Verificar si el proceso aún está vivo
-        poll_result = process.poll()
-        
-        if poll_result is not None:
-            # Proceso ya terminó, pero aún está en el diccionario
-            # (cleanup_finished() lo removerá)
-            return False
-        
+
+        script_path = self.scripts_dir / script_filename
+        if not script_path.exists():
+            self.logger.error(f"❌ Script no encontrado: {script_path}")
+            raise FileNotFoundError(f"Script no existe: {script_path}")
+
+        process_env = os.environ.copy()
+        if env_vars:
+            process_env.update(env_vars)
+
+        n_shards = len(shard_args_list)
+        launched_shards = []
+        overall_start = time.time()
+
+        for shard_id, extra_args in enumerate(shard_args_list):
+            cmd = [sys.executable, str(script_path)] + extra_args
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(self.scripts_dir.parent),
+                    env=process_env,
+                    text=True,
+                    bufsize=1,
+                )
+                shard_info = {
+                    "process": process,
+                    "shard_id": shard_id,
+                    "pid": process.pid,
+                    "extra_args": extra_args,
+                    "start_time": time.time(),
+                }
+                launched_shards.append(shard_info)
+                self.logger.info(
+                    f"🚀 {scraper_name} shard {shard_id}/{n_shards - 1} "
+                    f"lanzado (PID={process.pid}) "
+                    f"args={extra_args if extra_args else '(ninguno)'}"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"❌ Error lanzando shard {shard_id} de {scraper_name}: {e}",
+                    exc_info=True,
+                )
+                # Matar shards ya lanzados si este falla
+                for sh in launched_shards:
+                    try:
+                        sh["process"].kill()
+                    except Exception:
+                        pass
+                return False
+
+        # Registrar como activo
+        self.active_processes[scraper_name] = {
+            "shards": launched_shards,
+            "start_time": overall_start,
+            "start_datetime": datetime.now(),
+            "script_filename": script_filename,
+            "n_shards": n_shards,
+        }
+
+        # Inicializar stats si primera ejecución
+        if scraper_name not in self.execution_stats:
+            self.execution_stats[scraper_name] = {
+                "total_runs": 0,
+                "successful_runs": 0,
+                "failed_runs": 0,
+                "total_duration_sec": 0.0,
+                "last_start": None,
+                "last_duration": None,
+                "last_exit_code": None,
+                "avg_duration": None,
+            }
+        self.execution_stats[scraper_name]["total_runs"] += 1
+        self.execution_stats[scraper_name]["last_start"] = datetime.now()
+
+        if n_shards > 1:
+            self.logger.info(
+                f"✅ {scraper_name}: {n_shards} shards corriendo en paralelo"
+            )
         return True
-    
+
     def execute(
         self,
         scraper_name: str,
         script_filename: str,
-        env_vars: Optional[Dict[str, str]] = None
+        env_vars: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
-        Ejecuta un scraper en background como subproceso.
-        
-        Args:
-            scraper_name: Nombre identificador del scraper
-            script_filename: Nombre del archivo Python a ejecutar
-            env_vars: Variables de entorno adicionales (opcional)
-        
-        Returns:
-            True si se ejecutó exitosamente, False si ya estaba corriendo
-            o si hubo un error
-        
-        Raises:
-            FileNotFoundError: Si el script no existe
+        Retrocompatibilidad: ejecuta un scraper como shard único.
+        Delega a execute_shards con shard_args_list=[[]].
         """
-        #edittt - Verificar si ya está corriendo
-        if self.is_running(scraper_name):
-            self.logger.warning(
-                f"⏭️  {scraper_name} ya está en ejecución, skip"
-            )
+        return self.execute_shards(
+            scraper_name=scraper_name,
+            script_filename=script_filename,
+            shard_args_list=[[]],
+            env_vars=env_vars,
+        )
+
+    # ------------------------------------------------------------------
+    # Consultas de estado
+    # ------------------------------------------------------------------
+
+    def is_running(self, scraper_name: str) -> bool:
+        """
+        True si el scraper tiene al menos un shard vivo.
+        Un shard está vivo si process.poll() es None.
+        """
+        if scraper_name not in self.active_processes:
             return False
-        
-        #edittt - Construir ruta completa al script
-        script_path = self.scripts_dir / script_filename
-        
-        if not script_path.exists():
-            self.logger.error(
-                f"❌ Script no encontrado: {script_path}"
-            )
-            raise FileNotFoundError(f"Script no existe: {script_path}")
-        
-        #edittt - Preparar comando
-        cmd = [sys.executable, str(script_path)]
-        
-        #edittt - Preparar variables de entorno
-        import os
-        process_env = os.environ.copy()
-        if env_vars:
-            process_env.update(env_vars)
-        
-        #edittt - Ejecutar proceso
-        try:
-            self.logger.info(f"🚀 Ejecutando {scraper_name}: {script_filename}")
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(self.scripts_dir.parent),  # /app/scripts
-                env=process_env,
-                text=True,
-                bufsize=1  # Line buffered
-            )
-            
-            #edittt - Registrar proceso activo
-            start_time = time.time()
-            self.active_processes[scraper_name] = {
-                'process': process,
-                'start_time': start_time,
-                'start_datetime': datetime.now(),
-                'script_filename': script_filename,
-                'pid': process.pid
-            }
-            
-            #edittt - Inicializar stats si es la primera ejecución
-            if scraper_name not in self.execution_stats:
-                self.execution_stats[scraper_name] = {
-                    'total_runs': 0,
-                    'successful_runs': 0,
-                    'failed_runs': 0,
-                    'total_duration_sec': 0.0,
-                    'last_start': None,
-                    'last_duration': None,
-                    'last_exit_code': None,
-                    'avg_duration': None
-                }
-            
-            self.execution_stats[scraper_name]['total_runs'] += 1
-            self.execution_stats[scraper_name]['last_start'] = datetime.now()
-            
-            self.logger.info(
-                f"✅ {scraper_name} iniciado (PID={process.pid})"
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(
-                f"❌ Error ejecutando {scraper_name}: {e}",
-                exc_info=True
-            )
+        shards = self.active_processes[scraper_name]["shards"]
+        return any(sh["process"].poll() is None for sh in shards)
+
+    def is_stuck(self, scraper_name: str) -> bool:
+        """
+        True si el scraper lleva más tiempo que timeout_sec corriendo.
+        Se mide desde el start_time del primer shard.
+        """
+        if not self.is_running(scraper_name):
             return False
-    
-    def cleanup_finished(self) -> int:
+        if self.timeout_sec is None:
+            return False
+        elapsed = time.time() - self.active_processes[scraper_name]["start_time"]
+        return elapsed > self.timeout_sec
+
+    def get_uptime(self, scraper_name: str) -> Optional[float]:
+        """Segundos desde que el scraper fue lanzado. None si no corre."""
+        if scraper_name not in self.active_processes:
+            return None
+        return time.time() - self.active_processes[scraper_name]["start_time"]
+
+    def get_active_scrapers(self) -> List[str]:
+        """Lista de scrapers con al menos un shard vivo."""
+        return [n for n in list(self.active_processes.keys()) if self.is_running(n)]
+
+    # ------------------------------------------------------------------
+    # Cleanup y kill
+    # ------------------------------------------------------------------
+
+    def cleanup_finished(self) -> List[Tuple[str, float, bool]]:
         """
-        Limpia procesos terminados del registro de activos.
-        Actualiza estadísticas de ejecución.
-        
+        Detecta scrapers cuyos TODOS los shards terminaron.
+        Actualiza estadísticas internas y los remueve de active_processes.
+
         Returns:
-            Número de procesos limpiados
+            Lista de (scraper_name, total_duration_sec, success) para
+            cada scraper que acaba de completarse.
+            success=True si TODOS los shards terminaron con exit_code=0.
         """
-        cleaned_count = 0
-        scrapers_to_remove = []
-        
-        for scraper_name, process_info in self.active_processes.items():
-            process = process_info['process']
-            exit_code = process.poll()
-            
-            #edittt - Si poll() retorna None, el proceso aún corre
-            if exit_code is not None:
-                # Proceso terminó
-                scrapers_to_remove.append(scraper_name)
-                
-                #edittt - Calcular duración
-                duration = time.time() - process_info['start_time']
-                
-                #edittt - Actualizar estadísticas
-                stats = self.execution_stats[scraper_name]
-                stats['last_duration'] = duration
-                stats['last_exit_code'] = exit_code
-                stats['total_duration_sec'] += duration
-                
-                if exit_code == 0:
-                    stats['successful_runs'] += 1
+        completed = []
+        to_remove = []
+
+        for scraper_name, proc_info in self.active_processes.items():
+            shards = proc_info["shards"]
+
+            # ¿Terminaron TODOS los shards?
+            exit_codes = [sh["process"].poll() for sh in shards]
+            if any(code is None for code in exit_codes):
+                continue  # Al menos uno sigue corriendo
+
+            # Todos los shards terminaron
+            to_remove.append(scraper_name)
+            duration = time.time() - proc_info["start_time"]
+            success = all(code == 0 for code in exit_codes)
+
+            # Log por shard
+            for sh, code in zip(shards, exit_codes):
+                if code == 0:
                     self.logger.info(
-                        f"✅ {scraper_name} completado exitosamente "
-                        f"(duración: {duration:.2f}s)"
+                        f"✅ {scraper_name} shard {sh['shard_id']}: "
+                        f"exit=0 (duración total estimada: {duration:.1f}s)"
                     )
                 else:
-                    stats['failed_runs'] += 1
                     self.logger.error(
-                        f"❌ {scraper_name} falló con exit code {exit_code} "
-                        f"(duración: {duration:.2f}s)"
+                        f"❌ {scraper_name} shard {sh['shard_id']}: "
+                        f"exit={code}"
                     )
-                    
-                    #edittt - Capturar stderr si hay error
+                    # Capturar stderr del shard fallido
                     try:
-                        _, stderr = process.communicate(timeout=1)
+                        _, stderr = sh["process"].communicate(timeout=1)
                         if stderr:
                             self.logger.error(
-                                f"📋 {scraper_name} stderr (últimas 500 chars):\n"
-                                f"{stderr[-500:]}"
+                                f"   stderr: {stderr[-400:]}"
                             )
                     except subprocess.TimeoutExpired:
                         pass
-                
-                #edittt - Calcular promedio de duración
-                if stats['total_runs'] > 0:
-                    stats['avg_duration'] = (
-                        stats['total_duration_sec'] / stats['total_runs']
-                    )
-                
-                #edittt - Log adicional de CPU/memoria si psutil disponible
-                if PSUTIL_AVAILABLE:
-                    self._log_resource_usage(scraper_name)
-                
-                cleaned_count += 1
-        
-        #edittt - Remover procesos terminados del diccionario
-        for scraper_name in scrapers_to_remove:
-            del self.active_processes[scraper_name]
-        
-        if cleaned_count > 0:
-            self.logger.debug(f"🧹 Limpiados {cleaned_count} procesos terminados")
-        
-        return cleaned_count
-    
-    def _log_resource_usage(self, scraper_name: str):
-        """
-        Logea uso de CPU y memoria (requiere psutil).
-        
-        Args:
-            scraper_name: Nombre del scraper
-        """
-        if not PSUTIL_AVAILABLE:
-            return
-        
-        try:
-            # Obtener info del sistema
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            
-            self.logger.info(
-                f"📊 {scraper_name} recursos al terminar: "
-                f"CPU={cpu_percent:.1f}%, "
-                f"RAM={memory.percent:.1f}% ({memory.used / (1024**3):.2f}GB usado)"
-            )
-        except Exception as e:
-            self.logger.debug(f"No se pudo obtener info de recursos: {e}")
-    
-    def get_stats(self, scraper_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Obtiene estadísticas de ejecución de un scraper.
-        
-        Args:
-            scraper_name: Nombre del scraper
-        
-        Returns:
-            Diccionario con estadísticas o None si no hay datos
-        """
-        return self.execution_stats.get(scraper_name)
-    
-    def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Obtiene estadísticas de todos los scrapers.
-        
-        Returns:
-            Diccionario con stats de cada scraper
-        """
-        return self.execution_stats.copy()
-    
-    def is_stuck(self, scraper_name: str) -> bool:
-        """
-        Verifica si un scraper parece estar atascado (timeout excedido).
-        
-        Args:
-            scraper_name: Nombre del scraper
-        
-        Returns:
-            True si el timeout fue excedido, False si no
-        """
-        if not self.is_running(scraper_name):
-            return False
-        
-        if self.timeout_sec is None:
-            return False  # Sin timeout configurado
-        
-        process_info = self.active_processes[scraper_name]
-        elapsed = time.time() - process_info['start_time']
-        
-        return elapsed > self.timeout_sec
-    
-    def get_active_scrapers(self) -> list:
-        """
-        Retorna lista de nombres de scrapers actualmente en ejecución.
-        
-        Returns:
-            Lista de strings con nombres de scrapers activos
-        """
-        #edittt - Filtrar solo los que realmente están corriendo
-        active = []
-        for scraper_name in list(self.active_processes.keys()):
-            if self.is_running(scraper_name):
-                active.append(scraper_name)
-        return active
-    
-    def get_uptime(self, scraper_name: str) -> Optional[float]:
-        """
-        Obtiene el tiempo que lleva corriendo un scraper.
-        
-        Args:
-            scraper_name: Nombre del scraper
-        
-        Returns:
-            Tiempo en segundos o None si no está corriendo
-        """
-        if not self.is_running(scraper_name):
-            return None
-        
-        process_info = self.active_processes[scraper_name]
-        return time.time() - process_info['start_time']
-    
+
+            # Actualizar execution_stats de compatibilidad
+            stats = self.execution_stats.get(scraper_name, {})
+            stats["last_duration"] = duration
+            stats["last_exit_code"] = 0 if success else 1
+            stats["total_duration_sec"] = stats.get("total_duration_sec", 0) + duration
+            if stats["total_runs"]:
+                stats["avg_duration"] = (
+                    stats["total_duration_sec"] / stats["total_runs"]
+                )
+            if success:
+                stats["successful_runs"] = stats.get("successful_runs", 0) + 1
+            else:
+                stats["failed_runs"] = stats.get("failed_runs", 0) + 1
+            self.execution_stats[scraper_name] = stats
+
+            if PSUTIL_AVAILABLE:
+                self._log_resource_usage(scraper_name)
+
+            completed.append((scraper_name, duration, success))
+
+        for name in to_remove:
+            del self.active_processes[name]
+
+        return completed
+
     def kill_scraper(self, scraper_name: str, force: bool = False) -> bool:
         """
-        Termina un scraper en ejecución.
-        
-        Args:
-            scraper_name: Nombre del scraper
-            force: Si True, usa SIGKILL (forzado), si False usa SIGTERM (graceful)
-        
+        Mata todos los shards de un scraper.
+        NO llama a cleanup_finished() — el caller es responsable.
+
         Returns:
-            True si se terminó, False si no estaba corriendo
+            True si había procesos que matar, False si no estaba corriendo.
         """
-        if not self.is_running(scraper_name):
-            self.logger.warning(f"⚠️  {scraper_name} no está corriendo")
+        if scraper_name not in self.active_processes:
+            self.logger.warning(f"⚠️  kill_scraper: {scraper_name} no está activo")
             return False
-        
-        process_info = self.active_processes[scraper_name]
-        process = process_info['process']
-        
-        try:
-            if force:
-                self.logger.warning(f"🔪 Matando {scraper_name} (SIGKILL)")
-                process.kill()
-            else:
-                self.logger.info(f"⏹️  Terminando {scraper_name} (SIGTERM)")
-                process.terminate()
-            
-            # Esperar hasta 5 segundos a que termine
+
+        shards = self.active_processes[scraper_name]["shards"]
+        signal_name = "SIGKILL" if force else "SIGTERM"
+        self.logger.warning(
+            f"🔪 Matando {scraper_name} ({len(shards)} shard(s), {signal_name})"
+        )
+
+        for sh in shards:
+            proc = sh["process"]
+            if proc.poll() is not None:
+                continue  # ya terminó
             try:
-                process.wait(timeout=5)
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except Exception as e:
+                self.logger.error(f"   Error matando PID {sh['pid']}: {e}")
+
+        # Esperar hasta 5s a que terminen
+        deadline = time.time() + 5
+        for sh in shards:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                sh["process"].wait(timeout=max(0.1, remaining))
             except subprocess.TimeoutExpired:
                 if not force:
-                    # Si terminate no funcionó, forzar kill
-                    self.logger.warning(f"⚠️  {scraper_name} no respondió a SIGTERM, forzando SIGKILL")
-                    process.kill()
-                    process.wait(timeout=2)
-            
-            # Limpiar del registro
-            self.cleanup_finished()
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"❌ Error terminando {scraper_name}: {e}")
-            return False
-    
+                    try:
+                        sh["process"].kill()
+                    except Exception:
+                        pass
+
+        # Remover de active_processes para que cleanup no lo procese de nuevo
+        del self.active_processes[scraper_name]
+        return True
+
     def kill_all(self, force: bool = False) -> int:
-        """
-        Termina todos los scrapers en ejecución.
-        
-        Args:
-            force: Si True, usa SIGKILL, si False usa SIGTERM
-        
-        Returns:
-            Número de procesos terminados
-        """
-        active_scrapers = self.get_active_scrapers()
+        active = list(self.active_processes.keys())
         count = 0
-        
-        for scraper_name in active_scrapers:
-            if self.kill_scraper(scraper_name, force):
+        for name in active:
+            if self.kill_scraper(name, force):
                 count += 1
-        
         return count
-    
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _log_resource_usage(self, scraper_name: str):
+        if not PSUTIL_AVAILABLE:
+            return
+        try:
+            cpu = psutil.cpu_percent(interval=0.1)
+            mem = psutil.virtual_memory()
+            self.logger.info(
+                f"📊 {scraper_name}: CPU={cpu:.1f}% "
+                f"RAM={mem.percent:.1f}% ({mem.used / (1024**3):.2f}GB)"
+            )
+        except Exception:
+            pass
+
+    def get_stats(self, scraper_name: str) -> Optional[Dict[str, Any]]:
+        return self.execution_stats.get(scraper_name)
+
+    def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
+        return self.execution_stats.copy()
+
     def print_status(self):
-        """
-        Imprime el estado actual de todos los scrapers (para debugging).
-        """
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("ESTADO DE SCRAPERS")
-        print("="*70)
-        
-        #edittt - Scrapers activos
+        print("=" * 70)
         active = self.get_active_scrapers()
         if active:
             print(f"\n🔄 Scrapers Activos ({len(active)}):")
-            for scraper_name in active:
-                uptime = self.get_uptime(scraper_name)
-                process_info = self.active_processes[scraper_name]
-                print(f"  • {scraper_name}")
-                print(f"    - PID: {process_info['pid']}")
-                print(f"    - Uptime: {uptime:.1f}s")
-                print(f"    - Inicio: {process_info['start_datetime'].strftime('%H:%M:%S')}")
-                
-                if self.is_stuck(scraper_name):
-                    print(f"    - ⚠️  POSIBLE TIMEOUT (>{self.timeout_sec}s)")
+            for name in active:
+                info = self.active_processes[name]
+                uptime = self.get_uptime(name)
+                shards = info["shards"]
+                alive = sum(1 for sh in shards if sh["process"].poll() is None)
+                print(
+                    f"  • {name}: {alive}/{info['n_shards']} shards vivos, "
+                    f"uptime={uptime:.0f}s"
+                )
+                if self.is_stuck(name):
+                    print(f"    ⚠️  POSIBLE TIMEOUT (>{self.timeout_sec}s)")
         else:
             print("\n✅ No hay scrapers en ejecución")
-        
-        #edittt - Estadísticas
-        if self.execution_stats:
-            print(f"\n📊 Estadísticas de Ejecución:")
-            for scraper_name, stats in self.execution_stats.items():
-                print(f"\n  {scraper_name}:")
-                print(f"    - Total ejecuciones: {stats['total_runs']}")
-                print(f"    - Exitosas: {stats['successful_runs']}")
-                print(f"    - Fallidas: {stats['failed_runs']}")
-                if stats['avg_duration']:
-                    print(f"    - Duración promedio: {stats['avg_duration']:.2f}s")
-                if stats['last_duration']:
-                    print(f"    - Última duración: {stats['last_duration']:.2f}s")
-                if stats['last_exit_code'] is not None:
-                    print(f"    - Último exit code: {stats['last_exit_code']}")
-        
-        print("\n" + "="*70 + "\n")
-    
+        print("=" * 70 + "\n")
+
     def __repr__(self) -> str:
-        """Representación string para debugging."""
-        active_count = len(self.get_active_scrapers())
-        total_runs = sum(s['total_runs'] for s in self.execution_stats.values())
+        active = len(self.get_active_scrapers())
+        total = sum(s.get("total_runs", 0) for s in self.execution_stats.values())
         return (
-            f"ScraperExecutor(active={active_count}, "
-            f"total_runs={total_runs}, "
+            f"ScraperExecutor(active={active}, total_runs={total}, "
             f"scripts_dir={self.scripts_dir})"
         )
-
-
-#edittt - Función de testing
-def test_executor():
-    """
-    Función de prueba para verificar el executor.
-    Ejecuta un script de prueba simple.
-    """
-    import tempfile
-    import os
-    
-    print("\n" + "="*70)
-    print("TEST DE SCRAPER EXECUTOR")
-    print("="*70)
-    
-    #edittt - Crear script de prueba temporal
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_script = Path(tmpdir) / "test_scraper.py"
-        test_script.write_text("""
-import time
-import sys
-
-print("🧪 Test scraper iniciado")
-time.sleep(2)
-print("✅ Test scraper completado")
-sys.exit(0)
-""")
-        
-        #edittt - Crear executor
-        executor = ScraperExecutor(scripts_dir=tmpdir, timeout_sec=10)
-        
-        print("\n1️⃣  Ejecutando test_scraper...")
-        success = executor.execute('test_scraper', 'test_scraper.py')
-        print(f"   Resultado: {'✅ Ejecutado' if success else '❌ Falló'}")
-        
-        print("\n2️⃣  Verificando que está corriendo...")
-        is_running = executor.is_running('test_scraper')
-        print(f"   is_running: {is_running}")
-        
-        print("\n3️⃣  Intentando ejecutar duplicado...")
-        duplicate = executor.execute('test_scraper', 'test_scraper.py')
-        print(f"   Permitió duplicado: {duplicate} (debería ser False)")
-        
-        print("\n4️⃣  Esperando a que termine (2 segundos)...")
-        time.sleep(3)
-        
-        print("\n5️⃣  Limpiando procesos terminados...")
-        cleaned = executor.cleanup_finished()
-        print(f"   Limpiados: {cleaned}")
-        
-        print("\n6️⃣  Estado final:")
-        executor.print_status()
-    
-    print("="*70 + "\n")
-
-
-if __name__ == '__main__':
-    #edittt - Configurar logging para testing
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] [%(name)s] %(levelname)s: %(message)s'
-    )
-    
-    test_executor()

@@ -89,6 +89,10 @@ scrapers:
       k: 1   
       min_factor: 0.5
       max_factor: 2.1
+    
+    shards: 1              # fijo en 1 (rápido, no necesita más)
+    shard_strategy: generic
+    max_shards: 1
   
   # ---------------------------------------------------------------------------
   # Scraper: Has Visto A (Chiapas)
@@ -109,6 +113,10 @@ scrapers:
       k: 1    
       min_factor: 0.5
       max_factor: 2.1
+
+    shards: 1              # fijo en 1 (rápido, no necesita más)
+    shard_strategy: generic
+    max_shards: 1  
   
   # ---------------------------------------------------------------------------
   # Scraper: Amber Alert Nacional (FGR)
@@ -134,6 +142,10 @@ scrapers:
       k: 3.0          #EDITTTT - σ razonable con base ~10 min
       min_factor: 0.5 
       max_factor: 1.9
+
+    shards: null           # null = auto (calculará ~2 respecto a chiapas)
+    shard_strategy: states # divide los 32 estados entre shards
+    max_shards: 2          # tope: nunca más de 2 procesos paralelos  
    
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y OBSERVABILIDAD
@@ -180,6 +192,14 @@ advanced:
   # Cada X segundos, el executor verifica si hay procesos zombies
   cleanup_interval_sec: 60
 
+  # NUEVO: límite global de procesos concurrentes
+  # null = autodetectar (recomendado): max(2, cores + 1)
+  # Con 4 cores → auto = 5 slots
+  # Ajusta según cuántos scrapers pesados corran a la vez
+  max_total_workers: null
+
+  # NUEVO: tope de shards en modo auto (si un scraper no define max_shards)
+  default_max_shards: 2
 # ==============================================================================
 # NOTAS DE USO
 # ==============================================================================

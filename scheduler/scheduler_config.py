@@ -1,3 +1,4 @@
+#scheduler_config.py
 #Gestión de configuración del scheduler
 """
 Scheduler Configuration Manager
@@ -54,7 +55,10 @@ class SchedulerConfig:
                 'min_interval_min': 1.5,
                 'max_interval_min': 30,
                 'priority': 'medium',
-                'script_filename': 'paralelo_amber_chiapas.py'
+                'script_filename': 'paralelo_amber_chiapas.py',
+                'shards': 1,
+                'shard_strategy': 'generic',
+                'max_shards': 1
             },
             'havistoa_chiapas': {
                 'enabled': True,
@@ -63,7 +67,10 @@ class SchedulerConfig:
                 'min_interval_min': 1.5,
                 'max_interval_min': 30,
                 'priority': 'medium',
-                'script_filename': 'paralelo_havistoa_chiapas.py'
+                'script_filename': 'paralelo_havistoa_chiapas.py',
+                'shards': 1,
+                'shard_strategy': 'generic',
+                'max_shards': 1
             },
             'amber_nacional': {
                 'enabled': True,
@@ -72,7 +79,10 @@ class SchedulerConfig:
                 'min_interval_min': 10,
                 'max_interval_min': 60,
                 'priority': 'high',
-                'script_filename': 'paralelo_amber_nacional.py'
+                'script_filename': 'paralelo_amber_nacional.py',
+                'shards': None,
+                'shard_strategy': 'states',
+                'max_shards': 2
             }
         },
         'logging': {
@@ -85,7 +95,11 @@ class SchedulerConfig:
             'allow_concurrent_same_scraper': False,
             'scraper_timeout_sec': 900,
             'dynamic_interval_recalculation': True,
-            'cleanup_interval_sec': 60
+            'cleanup_interval_sec': 60,
+            # NUEVO: límite global de procesos concurrentes
+            'max_total_workers': None,   # None = auto (cores detectados)
+            # NUEVO: tope de shards por scraper en modo auto
+            'default_max_shards': 2
         }
     }
     
@@ -499,6 +513,80 @@ class SchedulerConfig:
             f"scrapers_enabled={len(self.get_enabled_scrapers())}"
             f")"
         )
+    def get_max_total_workers(self) -> int:
+        """
+        Número máximo de procesos concurrentes permitidos.
+
+        Si no está configurado (None), calcula automáticamente:
+            max_workers = max(2, cores + 1)
+
+        Esto garantiza que siempre hay al menos 1 slot libre para
+        scrapers rápidos mientras corre uno pesado.
+        """
+        override = self.config['advanced'].get('max_total_workers')
+        if override is not None:
+            return max(1, int(override))
+
+        cores = self.cpu_info['cores']
+        auto = max(2, cores + 1)
+        self.logger.info(
+            f"🔧 max_total_workers auto: {auto} "
+            f"(cores={cores}, fórmula: max(2, cores+1))"
+        )
+        return auto
+
+    def get_shard_config(self, scraper_name: str) -> dict:
+        """
+        Retorna la configuración de sharding para un scraper.
+
+        Returns:
+            {shards, shard_strategy, max_shards}
+        """
+        scraper_cfg = self.get_scraper_config(scraper_name) or {}
+        default_max = self.config['advanced'].get('default_max_shards', 2)
+        return {
+            'shards': scraper_cfg.get('shards', None),
+            'shard_strategy': scraper_cfg.get('shard_strategy', 'generic'),
+            'max_shards': scraper_cfg.get('max_shards', default_max),
+        }
+
+    def calculate_base_interval_from_duration(
+        self,
+        scraper_name: str,
+        effective_duration_sec: float,
+    ) -> float:
+        """
+        Calcula intervalo base usando una duración efectiva provista
+        (en lugar de estimated_duration_sec del config).
+
+        Usado por el scheduler para incorporar la duración adaptativa (EMA)
+        al reprogramar jobs.
+        """
+        scraper_config = self.get_scraper_config(scraper_name)
+        if not scraper_config:
+            return 30.0
+
+        # Si hay override manual, ignorar la duración y usar el manual
+        if scraper_config.get('base_interval_min') is not None:
+            return self._clamp_interval(
+                scraper_config['base_interval_min'], scraper_config
+            )
+
+        duration_min = effective_duration_sec / 60.0
+        performance_score = self.cpu_info['performance_score']
+        safety_factor = 2.5 - (performance_score / 100) * 1.0
+        base_interval = duration_min * safety_factor
+
+        tier = self.config['machine'].get('performance_tier', 'auto')
+        if tier != 'auto':
+            tier_multipliers = {'low': 2.0, 'medium': 1.5, 'high': 1.0}
+            base_interval *= tier_multipliers.get(tier, 1.5)
+
+        adjustment = self.config['machine'].get('interval_adjustment_factor', 1.0)
+        base_interval *= adjustment
+
+        return self._clamp_interval(base_interval, scraper_config)
+        
 
 
 #edittt - Función helper para testing rápido
