@@ -88,3 +88,9 @@ async def busqueda_avanzada(
             continue
 
     return {"resultados": resultados}
+
+
+#edittt - Endpoint de salud (conservar para monitoring general)
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}

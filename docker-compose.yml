@@ -1,7 +1,8 @@
-version: "3.1"
-services: 
+version: "3.8"
+
+services:
   postgres:
-    image: postgres:latest
+    image: postgres:18 #se sugiere usar 18 y no latest para que el codigo se mantenga mejor
     container_name: postgres
     ports:
       - "5432:5432"
@@ -9,11 +10,14 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: mysecretpassword
       POSTGRES_DB: cda_busqueda
+      PGDATA: /var/lib/postgresql/data/18/docker
     volumes:
-      - postgres_data:/var/lib/postgresql/data  # Named volume for persistent data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # Mount the SQL script for initialization
+      - postgres_data:/var/lib/postgresql/data # Named volume for persistent data
+      #tuve que modificar el volumen debido a que postgres 18 requiere otra dirección
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # Mount the SQL script for initialization
     networks:
       - app-network
+    restart: unless-stopped
 
   scrapper:
     container_name: python_scrapper
@@ -28,6 +32,8 @@ services:
       AWS_DEFAULT_REGION: us-east-1
     networks:
       - app-network
+    # (opcional) si quieres mantener el contenedor siempre vivo para EXEC, puedes añadir:
+    #restart: unless-stopped
 
   postgrest:
     image: postgrest/postgrest
@@ -39,14 +45,15 @@ services:
     depends_on:
       - postgres
     ports:
-      - "3000:3000"  # Expose PostgREST on port 3000
+      - "3000:3000" # Expose PostgREST on port 3000
     networks:
       - app-network
+    restart: unless-stopped
 
   frontend:
     container_name: nextjs_frontend
     build:
-      context: .  # Changed from ./frontend to .
+      context: . # Changed from ./frontend to .
       dockerfile: ./frontend/Dockerfile
     ports:
       - "3001:3001"
@@ -59,7 +66,7 @@ services:
     networks:
       - app-network
     restart: unless-stopped
-  
+
   backend:
     container_name: fastapi_backend
     build:
@@ -67,6 +74,13 @@ services:
       dockerfile: ./backend/Dockerfile
     ports:
       - "8000:8000"
+    #edittt - ELIMINADO: healthcheck ya no es necesario para el scheduler
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz > /dev/null"]
+    #   interval: 60s
+    #   timeout: 5s
+    #   retries: 6
+    #   start_period: 30s
     depends_on:
       - postgrest
     networks:
@@ -75,10 +89,53 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=us-east-1
+      - PYTHONUNBUFFERED=1
+    working_dir: /app
+    volumes:
+      - ./backend:/app #edittt - Solo backend, sin scripts
+    restart: unless-stopped
+
+  #edittt - Scheduler completamente rediseñado
+  scheduler:
+    build: 
+      context: .
+      dockerfile: ./scheduler/Dockerfile
+    container_name: scheduler
+    #edittt - CAMBIO CRÍTICO: Ahora depende de postgres directamente, no de backend
+    depends_on:
+      - postgres
+    environment:
+      #edittt - ELIMINADO: Variables obsoletas del scheduler viejo
+      # SCHEDULE_EVERY_SECONDS: "600"
+      # BACKEND_TRIGGER_URL: "http://backend:8000/run-scrapers"
+      # TRIGGER_TIMEOUT_SECONDS: "180"
+      
+      #edittt - NUEVO: Variables para los scrapers (conexión a BD)
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=cda_busqueda
+      - DB_USER=postgres
+      - DB_PASSWORD=mysecretpassword
+    volumes:
+      #edittt - CRÍTICO: Montar scripts de scraping (read-only)
+      - ./scripts:/app/scripts:ro
+      #edittt - OPCIONAL: Montar config.yaml para override (read-only)
+      # Si no montas esto, usa el config.yaml copiado en la imagen
+      - ./scheduler/config.yaml:/app/config.yaml:ro
+    networks:
+      - app-network
+    restart: unless-stopped
+    #edittt - NUEVO: Logging para debugging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   app-network:
     driver: bridge
 
 volumes:
-  postgres_data:  # Define named volume here, without any additional paths or spaces
+  postgres_data: # Define named volume here

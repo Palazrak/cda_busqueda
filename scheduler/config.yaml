@@ -1,0 +1,218 @@
+#Configuración completa del scheduler autónomo
+# Este archivo permite override manual de la detección automática de capacidades
+
+# ==============================================================================
+# CONFIGURACIÓN DE CAPACIDAD DE LA MÁQUINA
+# ==============================================================================
+machine:
+  # Override de detección automática de CPU
+  # null = autodetect (recomendado), o especifica número exacto
+  cores_override: 4        # Ej: 4, 8, 16, etc.
+  threads_override: 8      # Ej: 8, 16, 32, etc.
+  
+  # Tier de performance (afecta intervalos base)
+  # Opciones: "auto", "low", "medium", "high"
+  # - auto: calcula según cores detectados
+  # - low: máquina débil (intervalos más largos)
+  # - medium: máquina estándar
+  # - high: máquina potente (intervalos más cortos)
+  performance_tier: "medium"
+  
+  # Factor de ajuste manual (multiplicador de intervalos calculados)
+  # 1.0 = sin ajuste, 0.5 = mitad de tiempo, 2.0 = doble de tiempo
+  interval_adjustment_factor: 1.0
+
+# ==============================================================================
+# CONFIGURACIÓN DE JITTER (ALEATORIZACIÓN)
+# ==============================================================================
+jitter:
+  #Configuración GLOBAL de jitter (fallback por defecto)
+  # Estos valores se usan cuando un scraper NO define su propia sección "jitter"
+  # Factor k: controla la variabilidad de la distribución log-normal
+  # Valores típicos: 1-5
+  # - Mayor k = más variabilidad (más impredecible)
+  # - Menor k = menos variabilidad (más consistente)
+  k: 2
+  
+  # Factores de clamp (límites del multiplicador)
+  # min_factor: multiplicador mínimo permitido
+  # max_factor: multiplicador máximo permitido
+  # Ejemplo: con intervalo base de 20 min
+  #   - min_factor: 0.5 → mínimo 10 min
+  #   - max_factor: 2.0 → máximo 40 min
+  min_factor: 0.5
+  max_factor: 2.0 
+
+  # NOTA:
+  # Se recomienda: Cada scraper puede definir su propia sección "jitter" -->
+  #   jitter:
+  #     k: <valor>
+  #     min_factor: <valor>
+  #     max_factor: <valor>
+  # Si alguna clave falta en el scraper, el código debe usar el valor GLOBAL
+  # como fallback (p.ej. jitter.k global si falta jitter.k local).
+
+# ==============================================================================
+# CONFIGURACIÓN DE SCRAPERS INDIVIDUALES
+# ==============================================================================
+scrapers:
+  # ---------------------------------------------------------------------------
+  # Scraper: Amber Alert Chiapas
+  # ---------------------------------------------------------------------------
+  amber_chiapas:
+    enabled: true  # false = desactivar este scraper
+    
+    # Duración estimada de ejecución en segundos
+    # Se usa para calcular intervalo base (debe ser > duración para evitar overlaps)
+    estimated_duration_sec: 60
+    
+    # Intervalo base en minutos (null = calcular automáticamente)
+    # Si especificas un valor, se usa este en lugar del calculado
+    base_interval_min: null
+    
+    # Límites absolutos de intervalo (protección)
+    # El scheduler NUNCA programará fuera de estos límites
+    min_interval_min: 1.5   # Mínimo: 1.5 minutos
+    max_interval_min: 30   # Máximo: 30 minutos 
+    
+    # Prioridad (para futuras optimizaciones)
+    # Opciones: "low", "medium", "high"
+    priority: "medium"
+    
+    # Script a ejecutar (relativo a /app/scripts/paralelizado/)
+    script_filename: "paralelo_amber_chiapas.py"
+
+    #Configuración de jitter específica para Amber Chiapas
+    # Pensada para intervalos base pequeños (~3 min) sin tanto clamp a min
+    # valores tipicos de k: .5 - 1.5
+    jitter:
+      k: 1   
+      min_factor: 0.5
+      max_factor: 2.1
+    
+    shards: 1              # fijo en 1 (rápido, no necesita más)
+    shard_strategy: generic
+    max_shards: 1
+  
+  # ---------------------------------------------------------------------------
+  # Scraper: Has Visto A (Chiapas)
+  # ---------------------------------------------------------------------------
+  havistoa_chiapas:
+    enabled: true
+    estimated_duration_sec: 60
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_filename: "paralelo_havistoa_chiapas.py"
+
+    #Configuración de jitter específica para HaVistoA Chiapas
+    # Similar a Amber Chiapas porque tiene duración/intervalo comparable
+    # valores tipicos de k: .5 - 1.5
+    jitter:
+      k: 1    
+      min_factor: 0.5
+      max_factor: 2.1
+
+    shards: 1              # fijo en 1 (rápido, no necesita más)
+    shard_strategy: generic
+    max_shards: 1  
+  
+  # ---------------------------------------------------------------------------
+  # Scraper: Amber Alert Nacional (FGR)
+  # ---------------------------------------------------------------------------
+  amber_nacional:
+    enabled: true
+    
+    # Este scraper es MÁS LENTO (400s ≈ 6.7 minutos)
+    estimated_duration_sec: 400
+    base_interval_min: null
+    
+    # Intervalos más largos debido a la duración
+    min_interval_min: 10   # Mínimo: 8 minutos
+    max_interval_min: 60   # Máximo: 60 minutos (1.5 horas)
+    
+    priority: "high"
+    script_filename: "paralelo_amber_nacional.py"
+
+    #EDITTTT - Configuración de jitter específica para Amber Nacional
+    # Jitter más agresivo es aceptable porque el intervalo base es grande (~10+ min)
+    # valores tipicos de k: 2-7
+    jitter:
+      k: 3.0          #EDITTTT - σ razonable con base ~10 min
+      min_factor: 0.5 
+      max_factor: 1.9
+
+    shards: null           # null = auto (calculará ~2 respecto a chiapas)
+    shard_strategy: states # divide los 32 estados entre shards
+    max_shards: 2          # tope: nunca más de 2 procesos paralelos  
+   
+# ==============================================================================
+# CONFIGURACIÓN DE LOGGING Y OBSERVABILIDAD
+# ==============================================================================
+logging:
+  # Nivel de logging
+  # Opciones: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  # - DEBUG: muy verboso, útil para desarrollo
+  # - INFO: balance recomendado para producción
+  # - WARNING: solo problemas potenciales
+  level: "INFO"
+  
+  # Registrar tiempos de ejecución de cada scraper
+  log_execution_times: true
+  
+  # Registrar uso de CPU/memoria durante ejecución
+  # Requiere psutil, útil para debugging de performance
+  log_cpu_usage: true
+  
+  # Formato de timestamps
+  # Opciones: "iso", "readable"
+  timestamp_format: "iso"  # ISO 8601: 2025-01-15T10:30:00
+
+# ==============================================================================
+# CONFIGURACIÓN AVANZADA (OPCIONAL)
+# ==============================================================================
+advanced:
+  # Permitir ejecuciones paralelas del MISMO scraper
+  # false = si un scraper está corriendo, skip la siguiente ejecución (RECOMENDADO)
+  # true = permite múltiples instancias simultáneas (PELIGROSO)
+  allow_concurrent_same_scraper: false
+  
+  # Timeout máximo para un scraper (segundos)
+  # Si un scraper excede este tiempo, se considera "stuck" y se logea warning
+  # null = sin timeout
+  scraper_timeout_sec: 900  # 15 minutos
+  
+  # Recalcular intervalo después de cada ejecución
+  # true = intervalo dinámico con jitter cada vez (RECOMENDADO)
+  # false = intervalo fijo calculado al inicio
+  dynamic_interval_recalculation: true
+  
+  # Intervalo de limpieza de procesos terminados (segundos)
+  # Cada X segundos, el executor verifica si hay procesos zombies
+  cleanup_interval_sec: 60
+
+  # NUEVO: límite global de procesos concurrentes
+  # null = autodetectar (recomendado): max(2, cores + 1)
+  # Con 4 cores → auto = 5 slots
+  # Ajusta según cuántos scrapers pesados corran a la vez
+  max_total_workers: null
+
+  # NUEVO: tope de shards en modo auto (si un scraper no define max_shards)
+  default_max_shards: 2
+# ==============================================================================
+# NOTAS DE USO
+# ==============================================================================
+# 1. Para DESACTIVAR un scraper temporalmente: cambiar enabled a false
+# 2. Para ajustar MANUALMENTE intervalos: especifica base_interval_min
+# 3. Para máquinas DÉBILES: aumenta interval_adjustment_factor a 1.5 o 2.0
+# 4. Para máquinas POTENTES: reduce interval_adjustment_factor a 0.7 o 0.5
+# 5. Para DEBUGGING: cambia logging.level a "DEBUG"
+# 6. Los cambios en este archivo requieren REINICIAR el contenedor scheduler
+#
+# Comando para reiniciar:
+#   docker-compose restart scheduler
+#
+# Ver logs en tiempo real:
+#   docker logs -f scheduler
+# ==============================================================================
