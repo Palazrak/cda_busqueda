@@ -4,6 +4,8 @@ import json
 import time
 import datetime
 import random
+import hashlib
+import re
 import psycopg2
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -12,15 +14,55 @@ import multiprocessing
 DB_NAME = "cda_busqueda"
 DB_USER = "postgres"
 DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
+DB_HOST = "postgres" # cambiar
 DB_PORT = "5432"
 
-def insert_many_to_db(data_list: list, extraction_date: datetime.date):
-    """Inserta registros en la base de datos."""
-    if not data_list:
-        return  
+#
+# ------------------ Helpers: hash y S3 (S3 comentado) ------------------
+#
 
-    start_time = time.time()  
+# s3 = boto3.client("s3")
+# S3_BUCKET = "cdas-2025-alertas-amber"
+# S3_PREFIX = "pdf"
+
+def normalize_for_hash(value):
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+def make_hashid(parsed_data):
+    """
+    Genera hash a partir de:
+    folio, localizado, nombre, edad, descripcion_hechos, senas
+    Prefijo: 0501_
+    """
+    parts = [
+        normalize_for_hash(parsed_data.get("folio")),
+        normalize_for_hash(parsed_data.get("localizado")),
+        normalize_for_hash(parsed_data.get("nombre")),
+        normalize_for_hash(parsed_data.get("edad")),
+        normalize_for_hash(parsed_data.get("descripcion_hechos")),
+        normalize_for_hash(parsed_data.get("senas")),
+    ]
+    joined = "||".join(parts)
+    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
+    hashid = f"0501_{h}"
+    filename = f"{hashid}.pdf"
+    # s3_key = f"{S3_PREFIX}/{filename}"
+    s3_key = None  # S3 deshabilitado por ahora
+    return hashid, filename, s3_key
+
+
+def insert_many_to_db(data_list: list, extraction_date: datetime.date):
+    """
+    data_list: lista de tuplas (detalle_url, ficha_data)
+    """
+    if not data_list:
+        return
+
+    start_time = time.time()
+    conn = None
+    cur = None
 
     try:
         conn = psycopg2.connect(
@@ -28,25 +70,62 @@ def insert_many_to_db(data_list: list, extraction_date: datetime.date):
             user=DB_USER,
             password=DB_PASSWORD,
             host=DB_HOST,
-            port=DB_PORT
+            port=DB_PORT,
         )
         cur = conn.cursor()
 
-        insert_query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
-            VALUES (%s, %s, %s)
-        """
-        cur.executemany(insert_query, [
-            (extraction_date, url, json.dumps(data)) for url,data in data_list
-        ])
+        for detalle_url, data in data_list:
+            if not data:
+                continue
+
+            hashid, filename, s3_key = make_hashid(data)
+            localizado = data.get("localizado", False)
+
+            # ---------------- S3 (COMENTADO) ----------------
+            # Bloque intencionalmente comentado: este scraper todavía no descarga PDFs.
+            # try:
+            #     if not s3_object_exists(s3, S3_BUCKET, s3_key):
+            #         uploaded = upload_pdf_to_s3_if_not_exists(pdf_bytes, S3_BUCKET, s3_key, s3)
+            #     else:
+            #         print(f"☑️ Ya existe en S3: s3://{S3_BUCKET}/{s3_key}")
+            #         uploaded = False
+            # except Exception as e:
+            #     print(f"❌ Error verificando/guardando en S3: {e}")
+            #     uploaded = False
+            # ---------------- Fin S3 ----------------
+
+            # Checar duplicado antes de insertar
+            cur.execute(
+                "SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1",
+                (hashid, localizado),
+            )
+            if cur.fetchone() is not None:
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO public.desaparecidos
+                  (fecha_extraccion, url_origen, localizado, hashid, datos)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (extraction_date, detalle_url, localizado, hashid, json.dumps(data)),
+            )
+
         conn.commit()
-        
+
     except Exception as e:
-        print(f"❌ Error al conectar a la base de datos: {e}")
-    
+        print(f"❌ Error al conectar/insertar en la base de datos: {e}")
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     end_time = time.time()
     print(f"⏳ Tiempo de escritura en BD: {end_time - start_time:.2f} segundos")
@@ -78,6 +157,14 @@ def get_all_ficha_urls():
 def extract_data(data_section: BeautifulSoup):
     """Extrae la información de una ficha desde una sección HTML."""
     try:
+        text_all = data_section.get_text(" ", strip=True).lower() if data_section else ""
+        if re.search(r"\bno\s*localizad", text_all, flags=re.IGNORECASE):
+            localizado = False
+        elif re.search(r"\blocalizad", text_all, flags=re.IGNORECASE):
+            localizado = True
+        else:
+            localizado = False
+
         return {
             "nombre": data_section.find('h3').get_text(strip=True),
             "imagen_url": data_section.find('img')['src'],
@@ -97,7 +184,8 @@ def extract_data(data_section: BeautifulSoup):
             "originario_de": data_section.find('label', string='Originario de:').find_next('p').get_text(strip=True),
             "fecha_nacimiento": data_section.find('b', string='Fecha de nacimiento:').find_next('p').get_text(strip=True),
             "senas_particulares": data_section.find('strong', string='Señas Particulares:').find_next('p').get_text(strip=True),
-            "circunstancia": data_section.find('strong', string='Circunstancia:').find_next('p').get_text(strip=True)
+            "circunstancia": data_section.find('strong', string='Circunstancia:').find_next('p').get_text(strip=True),
+            "localizado": localizado,
         }
     except:
         return None  
@@ -160,7 +248,31 @@ def main():
     extraction_date = datetime.date.today()
     # SCRAPING
     scraped_data = scrape_all_fichas()
-    # Insercion en BD
+
+    # Normalizar campos para hash (igual a serial_havistoa_chiapas.py)
+    for detalle_url, ficha_data in scraped_data:
+        if not ficha_data:
+            continue
+
+        ficha_data["folio"] = ficha_data.get("registro")
+        ficha_data["senas"] = ficha_data.get("senas_particulares")
+        ficha_data["descripcion_hechos"] = ficha_data.get("circunstancia")
+        ficha_data["estado_alerta"] = "Desaparecidos Hasvistoa Chiapas"
+
+        # Edad calculada con (fecha_desaparicion - fecha_nacimiento)
+        fecha_nacimiento = ficha_data.get("fecha_nacimiento")
+        fecha_desaparicion = ficha_data.get("fecha_desaparicion")
+        edad = None
+        if fecha_nacimiento and fecha_desaparicion:
+            try:
+                birth = datetime.datetime.strptime(fecha_nacimiento, "%d/%m/%Y")
+                disp = datetime.datetime.strptime(fecha_desaparicion, "%d/%m/%Y")
+                edad = disp.year - birth.year - ((disp.month, disp.day) < (birth.month, birth.day))
+            except Exception:
+                edad = None
+        ficha_data["edad"] = edad
+
+    # Insercion en BD (deduplicada por hashid/localizado)
     insert_many_to_db(scraped_data, extraction_date)
 
     global_end_time = time.time()
