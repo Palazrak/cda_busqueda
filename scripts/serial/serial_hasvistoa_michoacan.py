@@ -7,8 +7,8 @@ import psycopg2
 import json
 import datetime
 import hashlib
-# import boto3
-# from botocore.exceptions import ClientError
+import boto3
+from botocore.exceptions import ClientError
 
 
 DB_NAME = "cda_busqueda"
@@ -17,9 +17,9 @@ DB_PASSWORD = "mysecretpassword"
 DB_HOST = "postgres"  # Use "postgres" when running inside Docker, "localhost" for local execution
 DB_PORT = "5432"
 
-# s3 = boto3.client("s3")
-# S3_BUCKET = "cdas-2025-alertas-amber"
-# S3_PREFIX = "pdf"
+s3 = boto3.client("s3")
+S3_BUCKET = "cdas-2025-alertas-amber"
+S3_PREFIX = "pdf"
 
 
 BASE_URL = "https://hasvistoa.fiscaliamichoacan.gob.mx"
@@ -51,35 +51,32 @@ def make_hashid(parsed_data):
     hashid = f"1702_{h}"
     filename = f"{hashid}.pdf"
     # según tu instrucción, guardamos en subcarpeta C dentro de pdf
-    # s3_key = f"{S3_PREFIX}/{filename}"  # COMMENTED OUT - S3 disabled for testing
-    s3_key = None  # S3 disabled for testing
+    s3_key = f"{S3_PREFIX}/{filename}"
     return hashid, filename, s3_key
 
 
-# def s3_object_exists(s3_client, bucket, key):
-#     try:
-#         s3_client.head_object(Bucket=bucket, Key=key)
-#         return True
-#     except ClientError as e:
-#         code = e.response.get('Error', {}).get('Code', '')
-#         if code in ("404", "NoSuchKey", 'NotFound'):
-#             return False
-#         # Para permisos u otros errores, re-lanzar
-#         raise
+def s3_object_exists(s3_client, bucket, key):
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code in ("404", "NoSuchKey", 'NotFound'):
+            return False
+        raise
 
 
-# def upload_pdf_to_s3_if_not_exists(pdf_bytes, bucket, key):
-#     s3 = boto3.client('s3')
-#     if s3_object_exists(s3, bucket, key):
-#         print(f"☑️ PDF already exists in S3: s3://{bucket}/{key}")
-#         return False
-#     try:
-#         s3.put_object(Bucket=bucket, Key=key, Body=pdf_bytes, ContentType='application/pdf')
-#         print(f"✅ PDF uploaded to s3://{bucket}/{key}")
-#         return True
-#     except Exception as e:
-#         print(f"❌ Error uploading to S3: {e}")
-#         return False
+def upload_pdf_to_s3_if_not_exists(pdf_bytes, bucket, key):
+    if s3_object_exists(s3, bucket, key):
+        print(f"☑️ PDF already exists in S3: s3://{bucket}/{key}")
+        return False
+    try:
+        s3.put_object(Bucket=bucket, Key=key, Body=pdf_bytes, ContentType='application/pdf')
+        print(f"✅ PDF uploaded to s3://{bucket}/{key}")
+        return True
+    except Exception as e:
+        print(f"❌ Error uploading to S3: {e}")
+        return False
 
 
 
@@ -554,16 +551,13 @@ def process_all():
         }
         # generar hashid y nombre de archivo
         hashid, filename, s3_key = make_hashid(data)
-        # Subir a S3 si no existe - COMMENTED OUT FOR TESTING
-        # try:
-        #     if not s3_object_exists(s3, S3_BUCKET, s3_key):
-        #         uploaded = upload_pdf_to_s3_if_not_exists(pdf_bytes, S3_BUCKET, s3_key)
-        #     else:
-        #         print(f"☑️ Ya existe en S3: s3://{S3_BUCKET}/{s3_key}")
-        #         uploaded = False
-        # except Exception as e:
-        #     print(f"❌ Error verificando/guardando en S3: {e}")
-        #     uploaded = False
+        try:
+            if not s3_object_exists(s3, S3_BUCKET, s3_key):
+                upload_pdf_to_s3_if_not_exists(pdf_bytes, S3_BUCKET, s3_key)
+            else:
+                print(f"☑️ Ya existe en S3: s3://{S3_BUCKET}/{s3_key}")
+        except Exception as e:
+            print(f"❌ Error verificando/guardando en S3: {e}")
 
          # Insertar en DB solo si no existe (hashid && localizado)
         inserted = insert_into_db(data, detalle_url, hashid)

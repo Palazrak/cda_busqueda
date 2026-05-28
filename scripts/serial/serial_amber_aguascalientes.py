@@ -35,6 +35,8 @@ s3 = boto3.client(
 S3_BUCKET = "cdas-2025-alertas-amber"
 S3_PREFIX = "pdf"
 
+TEST_LIMIT = None
+
 BASE_URL = "https://www.fiscalia-aguascalientes.gob.mx"
 PAGE_URL = BASE_URL + "/"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -325,6 +327,7 @@ def insert_into_db(data, url_origen, hashid):
                 pass
 
 def process_pdfs(pdf_links):
+    count = 0
     for entry in pdf_links:
         pdf_text, pdf_bytes = extract_text_from_pdf_url(entry["pdf_url"])
         if not pdf_text or not pdf_bytes:
@@ -380,6 +383,9 @@ def process_pdfs(pdf_links):
         print(f"🔑 HashID: {hashid}")
         insert_into_db(data, entry["pdf_url"], hashid)
         time.sleep(0.5)
+        count += 1
+        if TEST_LIMIT and count >= TEST_LIMIT:
+            break
 
 
 def main():
