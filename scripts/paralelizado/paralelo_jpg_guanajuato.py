@@ -1,4 +1,5 @@
 # ESTE SCRAPPER SÓLO SACA IMÁGENES DE LAS PERSONAS (SIN INFO)
+# ESTE SCRAPPER NO ES JPG (quedó arreglado en serial/serial_desaparecidas_guanajuato.py)
 
 
 import json
@@ -145,4 +146,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
