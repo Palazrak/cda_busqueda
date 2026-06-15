@@ -1,24 +1,30 @@
-import json
-import datetime
+'''
+ - [ ] Fiscalia General del Estado: [link](https://fiscaliaslp.gob.mx/vi/busqueda-de-personas-no-localizadas/)
+    - Elementos en un div con nombre, foto
+    - Al darles click, abre una nueva ventana con un JPG
+Hashid: 2501_
+'''
+
+import os
 import time
 import re
 from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import psycopg2
 import requests
 from bs4 import BeautifulSoup
 import urllib3
 from urllib.parse import urljoin
+import boto3
+from botocore.exceptions import ClientError
 
-# Deshabilitar advertencias SSL (el sitio usa certificados legacy)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"  # Cambiar a "postgres" si se ejecuta en Docker
-DB_PORT = "5432"
+s3 = boto3.client("s3")
+BUCKET_NAME = "cdas-2025-alertas-amber"
+S3_FOLDER = "jpg/"
+HASH_ID = "2501_"
+TEST_LIMIT = None  # Set to 1 for testing, None for full run
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 BASE_DATA_URL = "https://fiscaliaslp.gob.mx/DESAPARECIDOSFGE/"
@@ -26,61 +32,39 @@ LANDING_URL = urljoin(BASE_DATA_URL, "portada_pesquisa.php")
 MAX_WORKERS = 8
 
 
-def insert_many_to_db(data_list: List[Tuple[str, dict]], extraction_date: datetime.date) -> None:
-    """Inserta registros en la base de datos."""
-    if not data_list:
-        print("⚠️  No hay datos para insertar.")
-        return
+def get_existing_files(bucket, prefix):
+    existing = set()
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        if "Contents" in page:
+            for obj in page["Contents"]:
+                existing.add(os.path.basename(obj["Key"]))
+    return existing
 
-    print(f"💾 Preparando inserción de {len(data_list)} registros...")
-    start_time = time.time()
-
-    conn = None
-    cur = None
+def upload_image_to_s3(url, existing_files):
     try:
-        print(f"🔌 Conectando a la base de datos en {DB_HOST}:{DB_PORT}...")
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-        )
-        cur = conn.cursor()
-        print("✅ Conexión exitosa a la base de datos.")
-
-        insert_query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
-            VALUES (%s, %s, %s)
-        """
-        rows = [
-            (extraction_date, url, json.dumps(payload, ensure_ascii=False))
-            for url, payload in data_list
-        ]
-        print(f"📝 Insertando {len(rows)} registros...")
-        cur.executemany(insert_query, rows)
-        conn.commit()
-        print("✅ Inserción completada.")
-    except Exception as exc:
-        print(f"❌ Error al insertar en la base de datos: {exc}")
-        import traceback
-
-        traceback.print_exc()
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
-
-    print(f"⏳ Tiempo de escritura en BD: {time.time() - start_time:.2f} segundos")
+        url = requests.utils.requote_uri(url)
+        response = requests.get(url, headers=HEADERS, timeout=20, verify=False)
+        if response.status_code == 200:
+            file_name = os.path.basename(url.split("?")[0]) or "imagen.jpg"
+            file_name = f"{HASH_ID}{file_name}"
+            s3_key = f"{S3_FOLDER}{file_name}"
+            if file_name in existing_files:
+                print(f"La imagen ya existe en S3: {s3_key}")
+                return s3_key
+            s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=response.content)
+            print(f"Imagen subida a S3: {s3_key}")
+            return s3_key
+        else:
+            print(f"Error {response.status_code} al descargar {url}")
+    except Exception as e:
+        print(f"Error al descargar {url}: {e}")
+    return None
 
 
 def get_available_years() -> List[int]:
-    """Obtiene la lista de años desde la página de portada."""
-    print(f"📥 Obteniendo lista de años desde {LANDING_URL}...")
     response = requests.get(LANDING_URL, headers=HEADERS, timeout=30, verify=False)
     response.raise_for_status()
-
     soup = BeautifulSoup(response.content, "html.parser")
     years = []
     for option in soup.select("select#anio option"):
@@ -89,14 +73,12 @@ def get_available_years() -> List[int]:
             continue
         if value.isdigit():
             years.append(int(value))
-
     unique_years = sorted(set(years), reverse=True)
-    print(f"📅 Años detectados: {unique_years}")
+    print(f"Años detectados: {unique_years}")
     return unique_years
 
 
 def parse_detail_href(href: str) -> str | None:
-    """Convierte el javascript:popUp(...) a una URL absoluta."""
     if not href:
         return None
     match = re.search(r'popUp\("([^"]+)"\)', href)
@@ -107,7 +89,6 @@ def parse_detail_href(href: str) -> str | None:
 
 
 def extract_cards_from_soup(soup: BeautifulSoup, page_url: str, year: int) -> List[dict]:
-    """Extrae tarjetas del HTML."""
     records = []
     for foto in soup.select("div.foto"):
         text_link = foto.find("a", class_="textofoto")
@@ -132,21 +113,17 @@ def extract_cards_from_soup(soup: BeautifulSoup, page_url: str, year: int) -> Li
         if not nombre or not imagen_url:
             continue
 
-        records.append(
-            {
-                "nombre": nombre,
-                "edad": edad,
-                "imagen_url": imagen_url,
-                "detalle_url": detalle_url,
-                "anio": year,
-            }
-        )
-
+        records.append({
+            "nombre": nombre,
+            "edad": edad,
+            "imagen_url": imagen_url,
+            "detalle_url": detalle_url,
+            "anio": year,
+        })
     return records
 
 
 def fetch_year_cards(year: int) -> Tuple[int, List[dict]]:
-    """Descarga y procesa una página de año específico."""
     page_url = urljoin(BASE_DATA_URL, f"busqueda2.php?tipo=pesquisas&year={year}")
     try:
         response = requests.get(page_url, headers=HEADERS, timeout=30, verify=False)
@@ -155,67 +132,57 @@ def fetch_year_cards(year: int) -> Tuple[int, List[dict]]:
         cards = extract_cards_from_soup(soup, page_url, year)
         return year, cards
     except Exception as exc:
-        print(f"❌ Error al procesar el año {year}: {exc}")
+        print(f"Error al procesar el año {year}: {exc}")
         return year, []
 
 
 def get_all_cards_data() -> List[dict]:
-    """Obtiene todas las tarjetas disponibles para cada año."""
     years = get_available_years()
     if not years:
-        print("⚠️  No se pudieron detectar años disponibles.")
+        print("No se pudieron detectar años disponibles.")
         return []
 
     records: List[dict] = []
-
     max_workers = min(MAX_WORKERS, len(years))
-    print(f"⚙️  Descargando datos de {len(years)} años con {max_workers} hilos...")
+    print(f"Descargando datos de {len(years)} años con {max_workers} hilos...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetch_year_cards, year): year for year in years}
         for future in as_completed(futures):
             year, year_cards = future.result()
-            print(f"🔎 Año {year}: {len(year_cards)} tarjetas.")
+            print(f"Año {year}: {len(year_cards)} tarjetas.")
             records.extend(year_cards)
 
-    print(f"✅ Se extrajeron {len(records)} tarjetas en total.")
+    print(f"Se extrajeron {len(records)} tarjetas en total.")
     return records
-
-
-def scrape_all_cards() -> List[Tuple[str, dict]]:
-    """Estructura los datos para la inserción."""
-    start_time = time.time()
-
-    cards = get_all_cards_data()
-    if not cards:
-        return []
-
-    data = []
-    for card in cards:
-        payload = {
-            "imagen_url": card["imagen_url"],
-            "nombre": card["nombre"],
-            "edad": card.get("edad"),
-            "anio": card.get("anio"),
-            "estado_alerta": "Fiscalía SLP Desaparecidos",
-        }
-        url_origen = card.get("detalle_url") or card["imagen_url"]
-        data.append((url_origen, payload))
-
-    print(f"⏳ Tiempo de scraping: {time.time() - start_time:.2f} segundos")
-    return data
 
 
 def main() -> None:
     overall_start = time.time()
-    extraction_date = datetime.date.today()
 
-    scraped = scrape_all_cards()
-    insert_many_to_db(scraped, extraction_date)
+    cards = get_all_cards_data()
+    if not cards:
+        print("No se encontraron tarjetas.")
+        return
 
-    print(f"⏱️  Tiempo total: {time.time() - overall_start:.2f} segundos")
+    existing_files = get_existing_files(BUCKET_NAME, S3_FOLDER)
+    print(f"Archivos existentes en S3: {len(existing_files)}")
+
+    image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]
+
+    if TEST_LIMIT:
+        image_urls = image_urls[:TEST_LIMIT]
+        print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
+
+    print(f"Subiendo {len(image_urls)} imágenes a S3...")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(upload_image_to_s3, url, existing_files) for url in image_urls]
+        for f in as_completed(futures):
+            f.result()
+
+    print(f"Tiempo total: {time.time() - overall_start:.2f} segundos")
 
 
 if __name__ == "__main__":
     main()
-

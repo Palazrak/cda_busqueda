@@ -34,7 +34,7 @@ def make_hashid(parsed_data):
     """
     Genera hash a partir de:
     folio, localizado, nombre, edad, descripcion_hechos, senas
-    Prefijo: 0501_
+    Prefijo: 0601_
     """
     parts = [
         normalize_for_hash(parsed_data.get("folio")),
@@ -46,7 +46,7 @@ def make_hashid(parsed_data):
     ]
     joined = "||".join(parts)
     h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"0501_{h}"
+    hashid = f"0601_{h}"
     filename = f"{hashid}.pdf"
     # s3_key = f"{S3_PREFIX}/{filename}"
     s3_key = None  # S3 deshabilitado por ahora

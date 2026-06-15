@@ -1,3 +1,10 @@
+'''
+  - [X] Amber: [link](https://www.fgeqroo.gob.mx/alertas/Amber)
+    - Identico
+
+Prefijo hashid: 2402_
+'''
+
 import os
 import time
 import requests

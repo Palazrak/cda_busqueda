@@ -36,6 +36,8 @@ s3 = boto3.client(
 S3_BUCKET = "cdas-2025-alertas-amber"
 S3_PREFIX = "pdf"
 
+TEST_LIMIT = None
+
 BASE_URL = "https://www.fiscaliatabasco.gob.mx"
 PAGE_URL = f"{BASE_URL}/AtencionVictimas/AlertaAmber"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -281,6 +283,7 @@ def parsear_pdf(texto_extraido):
 
 
 def process_pdfs(pdf_links):
+    count = 0
     for entry in pdf_links:
         pdf_text, _, pdf_bytes = extract_text_and_image(entry["pdf_url"])
         if not pdf_text or not pdf_bytes:
@@ -331,6 +334,9 @@ def process_pdfs(pdf_links):
         # Luego insertarlo en la base
         insert_into_db(data, entry["pdf_url"], hashid)
         time.sleep(0.5)
+        count += 1
+        if TEST_LIMIT and count >= TEST_LIMIT:
+            break
 
 
 def main():
