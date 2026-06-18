@@ -52,7 +52,8 @@ export default function BusquedaSimple() {
     const encodedName = encodeURIComponent(removeAccents(fullName));
 
     try {
-      const apiUrl = `http://localhost:3000/desaparecidos?datos->>nombre=ilike.*${encodedName}*`;
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      const apiUrl = `${apiBaseUrl}/desaparecidos?datos->>nombre=ilike.*${encodedName}*`;
       
       const response = await fetch(apiUrl);
       

@@ -18,16 +18,22 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import re
+from pathlib import Path
+import sys
 import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
-import boto3
-import psycopg2
 import requests
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import insert_payload, make_hashid as make_shared_hashid
+from utils.s3_utils import upload_url_if_enabled
 
 # -------------------- Config --------------------
 API_BASE = "https://wsc.fgeguanajuato.gob.mx/pw-recursos/api/v1"
@@ -35,17 +41,8 @@ PORTAL_URL = "https://portal.fgeguanajuato.gob.mx/PortalWebEstatal/PersonasDesap
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Guanajuato-scraper/1.0)"}
 REQUEST_TIMEOUT = 45
 
-# DB: mantener configurable por entorno.
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
-DB_PORT = "5432"
-
 INSERT_DB_DEFAULT = True
 
-s3 = boto3.client("s3")
-S3_BUCKET = "cdas-2025-alertas-amber"
 S3_FOLDER = "html/"
 TEST_LIMIT = None
 
@@ -65,17 +62,7 @@ def normalize_for_hash(value: Any) -> str:
 
 def make_hashid(parsed_data: Dict[str, Any]) -> Tuple[str, str, None]:
     """Misma logica base que Michoacan; prefijo 1301_."""
-    parts = [
-        normalize_for_hash(parsed_data.get("folio")),
-        normalize_for_hash(parsed_data.get("localizado")),
-        normalize_for_hash(parsed_data.get("nombre")),
-        normalize_for_hash(parsed_data.get("edad")),
-        normalize_for_hash(parsed_data.get("descripcion_hechos")),
-        normalize_for_hash(parsed_data.get("senas")),
-    ]
-    joined = "||".join(parts)
-    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"1301_{h}"
+    hashid = make_shared_hashid("1301_", parsed_data)
     return hashid, f"{hashid}.pdf", None
 
 
@@ -179,7 +166,12 @@ def iter_paginated(path: str, max_pages: Optional[int] = None) -> Iterator[Tuple
     while True:
         if max_pages is not None and page >= max_pages:
             break
-        payload = api_get(path, {"page": page})
+        try:
+            payload = api_get(path, {"page": page})
+        except requests.RequestException as exc:
+            print(f"❌ Error consultando {path} page {page}: {exc}")
+            break
+
         if not isinstance(payload, dict):
             break
         content = payload.get("content") or []
@@ -226,47 +218,18 @@ def insert_into_db(
     localizado: bool,
     fecha_modificacion: datetime.datetime,
 ) -> bool:
-    extraction_date = datetime.date.today()
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
+        inserted = insert_payload(
+            "1301_",
+            datos,
+            url_origen,
+            localizado=localizado,
+            hashid=hashid,
         )
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1",
-            (hashid, localizado),
-        )
-        if cur.fetchone() is not None:
-            return False
-        cur.execute(
-            """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, fecha_modificacion, localizado, hashid, datos)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (extraction_date, url_origen, fecha_modificacion, localizado, hashid, json.dumps(datos)),
-        )
-        conn.commit()
-        return True
+        return bool(inserted)
     except Exception as e:
         print(f"❌ Error DB: {e}")
         return False
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def upload_image_to_s3(url, hashid):
@@ -275,18 +238,16 @@ def upload_image_to_s3(url, hashid):
     try:
         if not url.startswith("http"):
             url = API_BASE + "/" + url.lstrip("/")
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        if r.status_code != 200:
-            return None
         ext = os.path.splitext(url.split("?")[0])[-1]
         if not ext or len(ext) > 5:
             ext = ".jpg"
         filename = f"{hashid}{ext}"
         s3_key = f"{S3_FOLDER}{filename}"
-        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=r.content)
-        s3_url = f"s3://{S3_BUCKET}/{s3_key}"
-        print(f"✅ Imagen subida: {s3_url}")
-        return s3_url
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"✅ Imagen subida: {s3_url}")
+            return s3_url
+        return None
     except Exception as e:
         print(f"❌ Error S3: {e}")
         return None

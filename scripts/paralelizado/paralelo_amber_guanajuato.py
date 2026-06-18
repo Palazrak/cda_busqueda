@@ -10,17 +10,22 @@ import os
 import time
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import sys
 from urllib.parse import urljoin
 import urllib3
 
 import requests
-import boto3
-from botocore.exceptions import ClientError
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-s3 = boto3.client("s3")
-BUCKET_NAME = "cdas-2025-alertas-amber"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import build_record, insert_records
+from utils.s3_utils import upload_url_if_enabled
+
 S3_FOLDER = "jpg/"
 HASH_ID = "1302_"
 TEST_LIMIT = None  # Set to 1 for testing, None for full run
@@ -30,33 +35,70 @@ IMG_BASE = "https://boletines.guanajuato.gob.mx/desaparecidos/"
 
 
 def get_existing_files(bucket, prefix):
-    existing = set()
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        if "Contents" in page:
-            for obj in page["Contents"]:
-                existing.add(os.path.basename(obj["Key"]))
-    return existing
+    return set()
 
 def download_image(url, existing_files):
     try:
         url = requests.utils.requote_uri(url)
-        response = requests.get(url, timeout=20, verify=False)
-        if response.status_code == 200:
-            file_name = os.path.basename(url)
-            file_name = f"{HASH_ID}{file_name}"
-            s3_key = f"{S3_FOLDER}{file_name}"
-            if file_name in existing_files:
-                print(f"La imagen ya existe en S3: {s3_key}")
-                return s3_key
-            s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=response.content)
-            print(f"Imagen subida a S3: {s3_key}")
+        file_name = os.path.basename(url) or "imagen.jpg"
+        file_name = f"{HASH_ID}{file_name}"
+        s3_key = f"{S3_FOLDER}{file_name}"
+        if file_name in existing_files:
+            print(f"La imagen ya existe en S3: {s3_key}")
             return s3_key
-        else:
-            print(f"Error {response.status_code} al descargar {url}")
+        s3_url = upload_url_if_enabled(url, s3_key, timeout=20)
+        if s3_url:
+            print(f"Imagen subida a S3: {s3_url}")
+            return s3_url
     except Exception as e:
         print(f"Error al descargar {url}: {e}")
     return None
+
+
+def first_value(record, *keys):
+    for key in keys:
+        value = record.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def build_nombre(record):
+    direct = first_value(record, "nombre", "Nombre", "pNombre", "sNombre")
+    if direct:
+        return str(direct).strip()
+    parts = [
+        first_value(record, "pNombre", "nombre"),
+        first_value(record, "pApellidoPaterno", "apellidoPaterno", "primerApellido"),
+        first_value(record, "pApellidoMaterno", "apellidoMaterno", "segundoApellido"),
+    ]
+    return " ".join(str(part).strip() for part in parts if part).strip() or None
+
+
+def build_datos(record, imagen_url):
+    folio = first_value(record, "folio", "pFolio", "idPersona", "id", "Id")
+    descripcion = first_value(record, "descripcion_hechos", "pDescripcion", "hechos")
+    senas = first_value(record, "senas", "pSenas", "senas_particulares")
+    return {
+        "nombre": build_nombre(record),
+        "folio": str(folio) if folio is not None else imagen_url,
+        "estado_alerta": "Alerta Amber Guanajuato",
+        "imagen_url": imagen_url,
+        "descripcion_hechos": descripcion,
+        "senas": senas,
+        "localizado": False,
+        "raw": record,
+    }
+
+
+def insert_records_to_db(records, image_urls):
+    db_records = []
+    for record, imagen_url in zip(records, image_urls):
+        datos = build_datos(record, imagen_url)
+        db_records.append(build_record(HASH_ID, datos, imagen_url, localizado=False))
+    inserted = insert_records(db_records)
+    print(f"Insertados en DB: {inserted} nuevos de {len(db_records)} registros Amber Guanajuato")
+    return inserted
 
 def main():
     start_time = time.time()
@@ -78,12 +120,15 @@ def main():
 
     print(f"Total de URLs a descargar: {len(image_urls)}")
 
-    existing_files = get_existing_files(BUCKET_NAME, S3_FOLDER)
+    existing_files = get_existing_files(None, S3_FOLDER)
     print(f"Archivos existentes en S3: {len(existing_files)}")
 
     if TEST_LIMIT:
+        records = records[:TEST_LIMIT]
         image_urls = image_urls[:TEST_LIMIT]
         print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
+
+    insert_records_to_db(records, image_urls)
 
     workers = min(24, multiprocessing.cpu_count() * 2)
     print(f"Usando {workers} workers para la descarga de imágenes.")

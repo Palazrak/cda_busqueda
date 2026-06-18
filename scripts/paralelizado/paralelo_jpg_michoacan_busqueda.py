@@ -8,18 +8,23 @@ Prefijo hashid: 1701_
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import sys
 from urllib.parse import urljoin
 import urllib3
 
 import requests
 from bs4 import BeautifulSoup
-import boto3
-from botocore.exceptions import ClientError
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-s3 = boto3.client("s3")
-BUCKET_NAME = "cdas-2025-alertas-amber"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import build_record, insert_records
+from utils.s3_utils import upload_url_if_enabled
+
 S3_FOLDER = "jpg/"
 HASH_ID = "1701_"
 TEST_LIMIT = None  # Set to 1 for testing, None for full run
@@ -30,33 +35,45 @@ MAX_WORKERS = 8
 
 
 def get_existing_files(bucket, prefix):
-    existing = set()
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        if "Contents" in page:
-            for obj in page["Contents"]:
-                existing.add(os.path.basename(obj["Key"]))
-    return existing
+    return set()
 
 def upload_image_to_s3(url, existing_files):
     try:
         url = requests.utils.requote_uri(url)
-        response = requests.get(url, headers=HEADERS, timeout=20, verify=False)
-        if response.status_code == 200:
-            file_name = os.path.basename(url.split("?")[0]) or "imagen.jpg"
-            file_name = f"{HASH_ID}{file_name}"
-            s3_key = f"{S3_FOLDER}{file_name}"
-            if file_name in existing_files:
-                print(f"La imagen ya existe en S3: {s3_key}")
-                return s3_key
-            s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=response.content)
-            print(f"Imagen subida a S3: {s3_key}")
+        file_name = os.path.basename(url.split("?")[0]) or "imagen.jpg"
+        file_name = f"{HASH_ID}{file_name}"
+        s3_key = f"{S3_FOLDER}{file_name}"
+        if file_name in existing_files:
+            print(f"La imagen ya existe en S3: {s3_key}")
             return s3_key
-        else:
-            print(f"Error {response.status_code} al descargar {url}")
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"Imagen subida a S3: {s3_url}")
+            return s3_url
     except Exception as e:
         print(f"Error al descargar {url}: {e}")
     return None
+
+
+def insert_cards_to_db(cards):
+    records = []
+    for card in cards:
+        imagen_url = card.get("imagen_url")
+        if not imagen_url:
+            continue
+        datos = {
+            "nombre": card.get("nombre"),
+            "folio": imagen_url,
+            "estado_alerta": "Busqueda Michoacán",
+            "imagen_url": imagen_url,
+            "descripcion_hechos": None,
+            "senas": None,
+            "localizado": False,
+        }
+        records.append(build_record(HASH_ID, datos, imagen_url, localizado=False))
+    inserted = insert_records(records)
+    print(f"Insertados en DB: {inserted} nuevos de {len(records)} registros Michoacán")
+    return inserted
 
 
 def get_all_cards_data():
@@ -107,15 +124,15 @@ def main() -> None:
         print("No se encontraron tarjetas.")
         return
 
-    existing_files = get_existing_files(BUCKET_NAME, S3_FOLDER)
+    existing_files = get_existing_files(None, S3_FOLDER)
     print(f"Archivos existentes en S3: {len(existing_files)}")
 
-    image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]
-
     if TEST_LIMIT:
-        image_urls = image_urls[:TEST_LIMIT]
+        cards = cards[:TEST_LIMIT]
         print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
 
+    insert_cards_to_db(cards)
+    image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]
     print(f"Subiendo {len(image_urls)} imágenes a S3...")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

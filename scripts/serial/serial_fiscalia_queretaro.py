@@ -8,23 +8,18 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import time
-import psycopg2
 import json
-import datetime
-import hashlib
 import os
+from pathlib import Path
+import sys
 
-import boto3
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
+from utils.db_utils import insert_payload, make_hashid as make_shared_hashid
+from utils.s3_utils import upload_url_if_enabled
 
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
-DB_PORT = "5432"
-
-s3 = boto3.client("s3")
-S3_BUCKET = "cdas-2025-alertas-amber"
 S3_FOLDER = "html/"
 TEST_LIMIT = None
 
@@ -53,17 +48,7 @@ def normalize_for_hash(value):
 
 
 def make_hashid(parsed_data):
-    parts = [
-        normalize_for_hash(parsed_data.get("folio")),
-        normalize_for_hash(parsed_data.get("localizado")),
-        normalize_for_hash(parsed_data.get("nombre")),
-        normalize_for_hash(parsed_data.get("edad")),
-        normalize_for_hash(parsed_data.get("descripcion_hechos")),
-        normalize_for_hash(parsed_data.get("senas")),
-    ]
-    joined = "||".join(parts)
-    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"2301_{h}"
+    hashid = make_shared_hashid("2301_", parsed_data)
     filename = f"{hashid}.pdf"
     return hashid, filename
 
@@ -180,48 +165,21 @@ def fetch_html(url):
 # 3) Insertar en la base de datos
 # -------------------------------------------------------------------
 def insert_into_db(data, hashid):
-    extraction_date = datetime.date.today()
     localizado = data.get("localizado")
     url_origen = data.get("url_origen")
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD,
-            host=DB_HOST, port=DB_PORT
+        inserted = insert_payload(
+            "2301_",
+            data,
+            url_origen,
+            localizado=localizado,
+            hashid=hashid,
         )
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1",
-            (hashid, localizado)
-        )
-        if cur.fetchone() is not None:
-            print(f"✔ Ya existe: hashid={hashid}, localizado={localizado}")
-            return False
-
-        query = (
-            "INSERT INTO public.desaparecidos "
-            "(fecha_extraccion, url_origen, localizado, hashid, datos) "
-            "VALUES (%s, %s, %s, %s, %s)"
-        )
-        cur.execute(query, (extraction_date, url_origen, localizado, hashid, json.dumps(data)))
-        conn.commit()
-        print(f"✅ Insertado: hashid={hashid}")
-        return True
+        print(f"✅ Insertados en DB: {inserted} hashid={hashid}")
+        return bool(inserted)
     except Exception as e:
         print(f"❌ Error DB: {e}")
         return False
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def upload_image_to_s3(url, hashid):
@@ -230,18 +188,17 @@ def upload_image_to_s3(url, hashid):
     try:
         if not url.startswith("http"):
             url = BASE_URL + "/" + url.lstrip("/")
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        if r.status_code != 200:
-            return None
         ext = os.path.splitext(url.split("?")[0])[-1]
         if not ext or len(ext) > 5:
             ext = ".jpg"
         filename = f"{hashid}{ext}"
         s3_key = f"{S3_FOLDER}{filename}"
-        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=r.content)
-        s3_url = f"s3://{S3_BUCKET}/{s3_key}"
-        print(f"✅ Imagen subida: {s3_url}")
-        return s3_url
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"✅ Imagen subida: {s3_url}")
+            return s3_url
+        print("☑️ S3 deshabilitado; se conserva imagen_url de origen")
+        return None
     except Exception as e:
         print(f"❌ Error S3: {e}")
         return None

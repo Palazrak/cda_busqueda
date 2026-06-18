@@ -99,7 +99,8 @@ class SchedulerConfig:
             # NUEVO: límite global de procesos concurrentes
             'max_total_workers': None,   # None = auto (cores detectados)
             # NUEVO: tope de shards por scraper en modo auto
-            'default_max_shards': 2
+            'default_max_shards': 2,
+            'run_on_start': True
         }
     }
     
@@ -275,6 +276,11 @@ class SchedulerConfig:
 
         #edittt - Validar scrapers
         for scraper_name, scraper_config in self.config['scrapers'].items():
+            if not scraper_config.get('script_path') and not scraper_config.get('script_filename'):
+                self.logger.warning(
+                    f"⚠️  {scraper_name}: falta script_path/script_filename"
+                )
+
             #edittt - Validar intervalos
             if scraper_config['min_interval_min'] <= 0:
                 self.logger.warning(f"⚠️  {scraper_name}: min_interval_min inválido, usando 5")
@@ -313,6 +319,38 @@ class SchedulerConfig:
             Diccionario con configuración o None si no existe
         """
         return self.config['scrapers'].get(scraper_name)
+
+    def get_scraper_script_path(self, scraper_name: str) -> Optional[str]:
+        """
+        Obtiene la ruta del script para un scraper.
+
+        Soporta:
+        - script_path: ruta relativa a /app, ej. scripts/serial/foo.py
+        - script_filename: compatibilidad legacy para scripts/paralelizado/foo.py
+        """
+        scraper_config = self.get_scraper_config(scraper_name)
+        if not scraper_config:
+            return None
+
+        if scraper_config.get('script_path'):
+            return scraper_config['script_path']
+
+        script_filename = scraper_config.get('script_filename')
+        if script_filename:
+            return f"scripts/paralelizado/{script_filename}"
+
+        return None
+
+    def get_scraper_args(self, scraper_name: str) -> list:
+        """
+        Obtiene argumentos CLI base para un scraper.
+
+        Estos argumentos se anteponen a los argumentos de shard, para que
+        un scraper pueda recibir limites como --max-records o --max-pages.
+        """
+        scraper_config = self.get_scraper_config(scraper_name) or {}
+        args = scraper_config.get('args') or []
+        return [str(arg) for arg in args]
     
     #EDITTT - Helper para obtener jitter efectivo (global + override por scraper)
     def get_jitter_config(self, scraper_name: Optional[str] = None) -> Dict[str, float]:
@@ -549,6 +587,12 @@ class SchedulerConfig:
             'shard_strategy': scraper_cfg.get('shard_strategy', 'generic'),
             'max_shards': scraper_cfg.get('max_shards', default_max),
         }
+
+    def should_run_on_start(self) -> bool:
+        """
+        Determina si los scrapers habilitados deben lanzarse una vez al arrancar.
+        """
+        return self.config['advanced'].get('run_on_start', True)
 
     def calculate_base_interval_from_duration(
         self,

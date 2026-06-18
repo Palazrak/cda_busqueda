@@ -144,10 +144,13 @@ def execute_scraper(scraper_name: str):
         shard_strategy=shard_cfg['shard_strategy'],
         n_shards=n_shards,
     )
+    base_args = config.get_scraper_args(scraper_name)
+    if base_args:
+        shard_args_list = [base_args + shard_args for shard_args in shard_args_list]
 
     success = executor.execute_shards(
         scraper_name=scraper_name,
-        script_filename=scraper_cfg['script_filename'],
+        script_path=config.get_scraper_script_path(scraper_name),
         shard_args_list=shard_args_list,
     )
 
@@ -192,9 +195,12 @@ def _launch_from_queue(scraper_name: str):
         shard_strategy=shard_cfg['shard_strategy'],
         n_shards=n_shards,
     )
+    base_args = config.get_scraper_args(scraper_name)
+    if base_args:
+        shard_args_list = [base_args + shard_args for shard_args in shard_args_list]
     success = executor.execute_shards(
         scraper_name=scraper_name,
-        script_filename=scraper_cfg['script_filename'],
+        script_path=config.get_scraper_script_path(scraper_name),
         shard_args_list=shard_args_list,
     )
     if not success:
@@ -476,7 +482,7 @@ def initialize_scheduler():
 
     # 4. Executor
     executor = ScraperExecutor(
-        scripts_dir="/app/scripts/paralelizado",
+        app_dir="/app",
         timeout_sec=config.get_scraper_timeout(),
     )
 
@@ -542,6 +548,11 @@ def initialize_scheduler():
         max_instances=1,
     )
     logger.info(f"✅ Cleanup programado cada {cleanup_interval}s")
+
+    if config.should_run_on_start():
+        logger.info("▶️  run_on_start habilitado: lanzando scrapers iniciales")
+        for scraper_name in enabled:
+            execute_scraper(scraper_name)
 
     return scheduler
 

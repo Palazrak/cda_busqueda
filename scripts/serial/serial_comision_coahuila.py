@@ -10,17 +10,23 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import re
+from pathlib import Path
+import sys
 import time
 from typing import Any, Dict, Optional, Tuple
 
-import boto3
-import psycopg2
 import requests
 from bs4 import BeautifulSoup
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import insert_payload, make_hashid as make_shared_hashid
+from utils.s3_utils import upload_url_if_enabled
 
 
 # -------------------- Config --------------------
@@ -28,18 +34,8 @@ BASE_URL = "https://cbecz.gob.mx"
 LISTING_URL_TEMPLATE = BASE_URL + "/le-estamos-buscando?page={}"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
-DB_PORT = "5432"
+INSERT_DB_DEFAULT = True
 
-# Por decisión del usuario, la BD no está prendida para pruebas.
-# Se puede habilitar con `--insert-db`.
-INSERT_DB_DEFAULT = False
-
-s3 = boto3.client("s3")
-S3_BUCKET = "cdas-2025-alertas-amber"
 S3_FOLDER = "html/"
 TEST_LIMIT = None
 
@@ -407,80 +403,27 @@ def make_hashid(parsed_data: Dict[str, Any]) -> Tuple[str, str, None]:
     folio, localizado, nombre, edad, descripcion_hechos, senas
     Prefijo: 0901_
     """
-    parts = [
-        normalize_for_hash(parsed_data.get("folio")),
-        normalize_for_hash(parsed_data.get("localizado")),
-        normalize_for_hash(parsed_data.get("nombre")),
-        normalize_for_hash(parsed_data.get("edad")),
-        normalize_for_hash(parsed_data.get("descripcion_hechos")),
-        normalize_for_hash(parsed_data.get("senas")),
-    ]
-    joined = "||".join(parts)
-    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"0901_{h}"
+    hashid = make_shared_hashid("0901_", parsed_data)
     filename = f"{hashid}.pdf"
     return hashid, filename, None
 
 
-# -------------------- DB Insert (opcional) --------------------
+# -------------------- DB Insert --------------------
 def insert_into_db(data: Dict[str, Any], detalle_url: str, hashid: str, fecha_modificacion: datetime.datetime) -> bool:
-    extraction_date = datetime.date.today()
     localizado = bool(data.get("localizado", False))
-
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
+        inserted = insert_payload(
+            "0901_",
+            data,
+            detalle_url,
+            localizado=localizado,
+            hashid=hashid,
         )
-        cur = conn.cursor()
-
-        # Verificar existencia exactamente para (hashid, localizado)
-        cur.execute(
-            "SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1",
-            (hashid, localizado),
-        )
-        exists = cur.fetchone() is not None
-        if exists:
-            print(f"✔ No hay que insertar: ya existe hashid={hashid} y localizado={localizado}")
-            return False
-
-        query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, fecha_modificacion, localizado, hashid, datos)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """
-        cur.execute(
-            query,
-            (
-                extraction_date,
-                detalle_url,
-                fecha_modificacion,
-                localizado,
-                hashid,
-                json.dumps(data),
-            ),
-        )
-        conn.commit()
-        print(f"✅ Insertado en DB: hashid={hashid}")
-        return True
+        print(f"✅ Insertados en DB: {inserted} hashid={hashid}")
+        return bool(inserted)
     except Exception as e:
         print(f"❌ Error al insertar en la base de datos: {e}")
         return False
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 # -------------------- Scraping: listado -> fichas --------------------
@@ -519,7 +462,11 @@ def extract_detail_links_from_listing_html(html: str) -> list[str]:
 def scrape_all_network(max_pages: Optional[int] = None) -> list[Dict[str, Any]]:
     # 1) Detectar total páginas con página 1 (o base listing)
     first_url = LISTING_URL_TEMPLATE.format(1)
-    first_html = fetch_html(first_url)
+    try:
+        first_html = fetch_html(first_url)
+    except Exception as e:
+        print(f"❌ No se pudo obtener listado Coahuila {first_url}: {e}")
+        return []
     total_pages = get_total_pages_from_html(first_html)
     if max_pages is not None:
         total_pages = min(total_pages, max_pages)
@@ -585,18 +532,16 @@ def upload_image_to_s3(url, hashid):
         from urllib.parse import urljoin
         if not url.startswith("http"):
             url = urljoin(BASE_URL, url)
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        if r.status_code != 200:
-            return None
         ext = os.path.splitext(url.split("?")[0])[-1]
         if not ext or len(ext) > 5:
             ext = ".jpg"
         filename = f"{hashid}{ext}"
         s3_key = f"{S3_FOLDER}{filename}"
-        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=r.content)
-        s3_url = f"s3://{S3_BUCKET}/{s3_key}"
-        print(f"✅ Imagen subida: {s3_url}")
-        return s3_url
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"✅ Imagen subida: {s3_url}")
+            return s3_url
+        return None
     except Exception as e:
         print(f"❌ Error S3: {e}")
         return None
@@ -605,7 +550,8 @@ def upload_image_to_s3(url, hashid):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--examples", action="store_true", help="Procesa las 5 fichas de ejemplo localmente y guarda JSON.")
-    parser.add_argument("--insert-db", action="store_true", help="Inserta resultados en la base de datos (si está disponible).")
+    parser.add_argument("--insert-db", action="store_true", help="Compatibilidad: DB ya está habilitada por defecto.")
+    parser.add_argument("--no-insert-db", action="store_true", help="Solo scrapea sin insertar en la base de datos.")
     parser.add_argument("--max-pages", type=int, default=None, help="Máximo de páginas a scrapear (red).")
     args = parser.parse_args()
 
@@ -620,7 +566,7 @@ def main() -> None:
         return
 
     # Red
-    INSERT_DB = bool(args.insert_db or INSERT_DB_DEFAULT)
+    INSERT_DB = INSERT_DB_DEFAULT and not args.no_insert_db
     insert_count = 0
 
     scraped = scrape_all_network(max_pages=args.max_pages)

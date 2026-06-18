@@ -47,6 +47,10 @@ psycopg2-binary==2.9.9
 # Funcionalidad: Extraer texto de PDFs de alertas amber
 PyMuPDF==1.23.26
 
+# boto3 - Cliente AWS S3
+# Uso opcional vía scripts/utils/s3_utils.py cuando S3_UPLOAD_ENABLED=true
+boto3==1.34.34
+
 # =============================================================================
 # DEPENDENCIAS OPCIONALES PERO RECOMENDADAS
 # =============================================================================

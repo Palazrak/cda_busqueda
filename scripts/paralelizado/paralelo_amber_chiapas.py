@@ -1,21 +1,19 @@
 import requests
 from bs4 import BeautifulSoup
-import json
 import time
 import datetime
 import random
-import hashlib
 import re
-import psycopg2
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import sys
 
-# Configuración de la base de datos
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres" # cambiar
-DB_PORT = "5432"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import DesaparecidoRecord, insert_records, make_hashid
 
 #
 # ------------------ Helpers: hash y S3 (S3 comentado) ------------------
@@ -24,33 +22,6 @@ DB_PORT = "5432"
 # s3 = boto3.client("s3")
 # S3_BUCKET = "cdas-2025-alertas-amber"
 # S3_PREFIX = "pdf"
-
-def normalize_for_hash(value):
-    if value is None:
-        return ""
-    return re.sub(r"\s+", " ", str(value)).strip().lower()
-
-def make_hashid(parsed_data):
-    """
-    Genera hash a partir de:
-    folio, localizado, nombre, edad, descripcion_hechos, senas
-    Prefijo: 0602_
-    """
-    parts = [
-        normalize_for_hash(parsed_data.get("folio")),
-        normalize_for_hash(parsed_data.get("localizado")),
-        normalize_for_hash(parsed_data.get("nombre")),
-        normalize_for_hash(parsed_data.get("edad")),
-        normalize_for_hash(parsed_data.get("descripcion_hechos")),
-        normalize_for_hash(parsed_data.get("senas")),
-    ]
-    joined = "||".join(parts)
-    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"0602_{h}"
-    filename = f"{hashid}.pdf"
-    # s3_key = f"{S3_PREFIX}/{filename}"
-    s3_key = None  # S3 deshabilitado por ahora
-    return hashid, filename, s3_key
 
 
 # Insertar con deduplicación por (hashid, localizado)
@@ -62,70 +33,28 @@ def insert_many_to_db(data_list: list, extraction_date: datetime.date):
         return
 
     start_time = time.time()
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-        )
-        cur = conn.cursor()
-
+        records = []
         for detalle_url, data in data_list:
             if not data:
                 continue
 
-            hashid, filename, s3_key = make_hashid(data)
+            hashid = make_hashid("0602_", data)
             localizado = data.get("localizado", False)
-
-            # ---------------- S3 (COMENTADO) ----------------
-            # Bloque intencionalmente comentado: este scraper todavía no descarga PDFs.
-            # try:
-            #     if not s3_object_exists(s3, S3_BUCKET, s3_key):
-            #         uploaded = upload_pdf_to_s3_if_not_exists(pdf_bytes, S3_BUCKET, s3_key, s3)
-            #     else:
-            #         print(f"☑️ Ya existe en S3: s3://{S3_BUCKET}/{s3_key}")
-            #         uploaded = False
-            # except Exception as e:
-            #     print(f"❌ Error verificando/guardando en S3: {e}")
-            #     uploaded = False
-            # ---------------- Fin S3 ----------------
-
-            # Checar duplicado antes de insertar
-            cur.execute(
-                "SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1",
-                (hashid, localizado),
-            )
-            if cur.fetchone() is not None:
-                continue
-
-            cur.execute(
-                """
-                INSERT INTO public.desaparecidos
-                  (fecha_extraccion, url_origen, localizado, hashid, datos)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (extraction_date, detalle_url, localizado, hashid, json.dumps(data)),
+            records.append(
+                DesaparecidoRecord(
+                    fecha_extraccion=extraction_date,
+                    url_origen=detalle_url,
+                    localizado=localizado,
+                    hashid=hashid,
+                    datos=data,
+                )
             )
 
-        conn.commit()
-
+        inserted = insert_records(records)
+        print(f"✅ Insertados {inserted} registros nuevos en la BD.")
     except Exception as e:
         print(f"❌ Error al conectar/insertar en la base de datos: {e}")
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     end_time = time.time()
     print(f"⏳ Tiempo de escritura en BD: {end_time - start_time:.2f} segundos")

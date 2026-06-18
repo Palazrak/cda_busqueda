@@ -67,7 +67,8 @@ export default function BusquedaAvanzada() {
       }
       formData.append('foto', foto);
 
-      const response = await fetch('http://localhost:8000/busqueda-avanzada', {
+      const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+      const response = await fetch(`${backendBaseUrl}/busqueda-avanzada`, {
         method: 'POST',
         body: formData,
       });
