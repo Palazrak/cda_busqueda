@@ -4,6 +4,7 @@
     - Todos los elementos estan en HTML extraible
     - Prefijo hashid: 2301_
 '''
+import argparse
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -38,6 +39,23 @@ PAGES = [
     ("/NoLocalizados/NoLocalizados_Hme.html", "Masculino", "Menor"),
     ("/NoLocalizados/NoLocalizados_Hmy.html", "Masculino", "Mayor"),
 ]
+
+
+def select_pages_for_shard(pages, page_indexes=None):
+    """Filtra páginas por índices 0-based separados por coma."""
+    if page_indexes is None or str(page_indexes).strip() == "":
+        return list(pages)
+    selected_indexes = set()
+    for raw_index in str(page_indexes).split(","):
+        raw_index = raw_index.strip()
+        if not raw_index:
+            continue
+        selected_indexes.add(int(raw_index))
+    return [
+        page
+        for index, page in enumerate(pages)
+        if index in selected_indexes
+    ]
 
 
 # ------------------ Helpers: hash ------------------
@@ -207,10 +225,11 @@ def upload_image_to_s3(url, hashid):
 # -------------------------------------------------------------------
 # 4) Flujo principal
 # -------------------------------------------------------------------
-def process_all():
+def process_all(page_indexes=None):
     total_insertados = 0
     total_count = 0
-    for path, genero, grupo_edad in PAGES:
+    pages = select_pages_for_shard(PAGES, page_indexes=page_indexes)
+    for path, genero, grupo_edad in pages:
         url = BASE_URL + path
         print(f"\n{'='*70}")
         print(f"Procesando: {url} ({genero} {grupo_edad})")
@@ -247,4 +266,11 @@ def process_all():
 
 
 if __name__ == "__main__":
-    process_all()
+    parser = argparse.ArgumentParser(description="Scraper Fiscalía Querétaro")
+    parser.add_argument(
+        "--page-indexes",
+        default=None,
+        help="Índices 0-based de PAGES separados por coma, por ejemplo 0,2",
+    )
+    args = parser.parse_args()
+    process_all(page_indexes=args.page_indexes)

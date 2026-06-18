@@ -246,7 +246,27 @@ def insert_into_db(
 
 
 # -------------------- Scraping principal --------------------
-def iter_all_cedulas(limit: int, max_pages_per_estado: Optional[int] = None):
+def select_shard_states(
+    estados: List[Tuple[str, int]],
+    shard_index: Optional[int] = None,
+    shard_count: Optional[int] = None,
+) -> List[Tuple[str, int]]:
+    """Selecciona la porción de estados que corresponde a este shard."""
+    if shard_index is None or not shard_count or shard_count <= 1:
+        return estados
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(
+            f"shard_index debe estar entre 0 y {shard_count - 1} (recibido {shard_index})"
+        )
+    return estados[shard_index::shard_count]
+
+
+def iter_all_cedulas(
+    limit: int,
+    max_pages_per_estado: Optional[int] = None,
+    shard_index: Optional[int] = None,
+    shard_count: Optional[int] = None,
+):
     raw = fetch_estados_con_cedulas()
     estados: List[Tuple[str, int]] = []
     for nombre, info in raw.items():
@@ -260,7 +280,14 @@ def iter_all_cedulas(limit: int, max_pages_per_estado: Optional[int] = None):
         except (TypeError, ValueError):
             continue
 
-    print(f"📍 Estados con cédulas: {len(estados)} → {estados}")
+    estados = select_shard_states(estados, shard_index=shard_index, shard_count=shard_count)
+    if shard_index is not None and shard_count and shard_count > 1:
+        print(
+            f"🔀 Shard {shard_index}/{shard_count}: "
+            f"{len(estados)} estados con cédulas → {estados}"
+        )
+    else:
+        print(f"📍 Estados con cédulas: {len(estados)} → {estados}")
 
     for nombre_estado, estado_id in estados:
         page = 1
@@ -321,6 +348,8 @@ def main() -> None:
         help="Solo las primeras N páginas por estado (pruebas)",
     )
     parser.add_argument("--max-records", type=int, default=None, help="Limitar registros procesados en esta corrida")
+    parser.add_argument("--shard-index", type=int, default=None, help="Índice 0-based del shard a procesar")
+    parser.add_argument("--shard-count", type=int, default=None, help="Cantidad total de shards")
     args = parser.parse_args()
 
     insert_db = INSERT_DB_DEFAULT and not args.no_insert_db
@@ -330,7 +359,12 @@ def main() -> None:
     processed = 0
     inserted = 0
 
-    for item in iter_all_cedulas(limit=args.limit, max_pages_per_estado=args.max_pages_per_estado):
+    for item in iter_all_cedulas(
+        limit=args.limit,
+        max_pages_per_estado=args.max_pages_per_estado,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    ):
         datos, localizado = build_datos_from_api(item)
         hf = hash_fields_from_api(item, datos, localizado)
         hashid, _, _ = make_hashid(hf)

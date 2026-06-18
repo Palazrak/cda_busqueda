@@ -15,6 +15,7 @@ Flujo del cleanup job (cada cleanup_interval_sec):
 """
 
 import logging
+import math
 import signal
 import sys
 import time
@@ -95,6 +96,49 @@ def _calculate_shards_for(scraper_name: str) -> int:
         reference_duration_sec=ref_dur,
         max_shards=shard_cfg['max_shards'],
     )
+
+
+def _queue_score(scraper_name: str, age_sec: float) -> float:
+    """
+    Score freshness-first para decidir qué pendiente sale primero.
+
+    Favorece prioridad y antigüedad en cola, añade una señal suave por
+    volumen histórico y penaliza corridas largas para no bloquear slots.
+    """
+    priority_cfg = config.get_priority_config(scraper_name)
+    scraper_cfg = config.get_scraper_config(scraper_name) or {}
+    effective_dur = (
+        stats_tracker.get_effective_duration(scraper_name)
+        or scraper_cfg.get('estimated_duration_sec', 60)
+        or 60
+    )
+
+    age_min = max(0.0, age_sec / 60.0)
+    age_bonus = min(
+        priority_cfg['max_age_bonus'],
+        age_min * priority_cfg['starvation_bonus_per_min'],
+    )
+    record_estimate = max(0, priority_cfg['record_count_estimate'])
+    record_bonus = (
+        math.log10(record_estimate) * priority_cfg['record_bonus_factor']
+        if record_estimate > 1
+        else 0.0
+    )
+    duration_penalty = min(
+        priority_cfg['max_duration_penalty'],
+        (float(effective_dur) / 60.0) * priority_cfg['duration_penalty_per_min'],
+    )
+    return priority_cfg['weight'] + age_bonus + record_bonus - duration_penalty
+
+
+def _required_slots_for_queue(scraper_name: str):
+    """Retorna slots requeridos o None si el item debe quedarse bloqueado."""
+    scraper_cfg = config.get_scraper_config(scraper_name)
+    if not scraper_cfg or not scraper_cfg.get('enabled', True):
+        return None
+    if executor.is_running(scraper_name):
+        return None
+    return _calculate_shards_for(scraper_name)
 
 
 def execute_scraper(scraper_name: str):
@@ -216,36 +260,33 @@ def _launch_from_queue(scraper_name: str):
 
 def _try_drain_queue():
     """
-    Intenta ejecutar items de la cola pendiente en orden FIFO estricto.
-
-    Solo avanza al siguiente si el frente de la cola tiene slots disponibles.
-    Esto preserva el FIFO: si el primero no cabe, los demás esperan.
+    Ejecuta items pendientes por prioridad, saltando los que no caben.
     """
     logger = logging.getLogger("Scheduler")
 
     while pending_queue.size() > 0:
-        front = pending_queue.peek_front()
-        if front is None:
+        free_slots = worker_pool.slots_free()
+        if free_slots <= 0:
             break
 
-        # Verificar si ya está corriendo (puede haber cambiado desde que se encoló)
-        if executor.is_running(front):
-            # Sigue corriendo; dejar en cola para el próximo ciclo
-            break
-
-        n_shards = _calculate_shards_for(front)
-        if worker_pool.slots_free() < n_shards:
+        dequeued = pending_queue.dequeue_best(
+            free_slots=free_slots,
+            required_slots=_required_slots_for_queue,
+            score_func=_queue_score,
+        )
+        if not dequeued:
             logger.debug(
-                f"📋 Cola: {front} necesita {n_shards} slots, "
-                f"solo {worker_pool.slots_free()} disponibles — esperando"
+                f"📋 Cola: ningún pendiente cabe en {free_slots} slot(s) libres "
+                f"o todos siguen corriendo. cola={pending_queue.peek_all()}"
             )
-            break  # FIFO estricto: no saltar al siguiente
+            break
 
-        # Dequeue y lanzar
-        dequeued = pending_queue.dequeue_one()
-        if dequeued:
-            logger.info(f"▶️  Drenando cola: {dequeued} ({pending_queue.size()} restantes)")
-            _launch_from_queue(dequeued)
+        score = _queue_score(dequeued, 0.0)
+        logger.info(
+            f"▶️  Drenando cola priorizada: {dequeued} "
+            f"(score≈{score:.1f}, {pending_queue.size()} restantes)"
+        )
+        _launch_from_queue(dequeued)
 
 
 def _reschedule_scraper(scraper_name: str):
@@ -550,9 +591,10 @@ def initialize_scheduler():
     logger.info(f"✅ Cleanup programado cada {cleanup_interval}s")
 
     if config.should_run_on_start():
-        logger.info("▶️  run_on_start habilitado: lanzando scrapers iniciales")
+        logger.info("▶️  run_on_start habilitado: encolando scrapers iniciales por prioridad")
         for scraper_name in enabled:
-            execute_scraper(scraper_name)
+            pending_queue.enqueue(scraper_name)
+        _try_drain_queue()
 
     return scheduler
 

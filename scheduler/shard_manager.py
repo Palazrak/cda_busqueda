@@ -3,7 +3,9 @@ Shard Manager - Divide el trabajo de un scraper en N shards paralelos.
 
 Estrategias:
   "states"  → parte la lista de estados (para amber_nacional)
-  "generic" → pasa --shard-index N --shard-count N al script (futuros scrapers)
+  "jalisco_states" → el script divide estados dinámicos por índice de shard
+  "queretaro_pages" → parte las 4 páginas fijas de Querétaro
+  "generic" / "generic_slice" → pasa --shard-index N --shard-count N al script
 
 Para n_shards=1 no se añaden args extra (retrocompatible).
 
@@ -24,6 +26,7 @@ from typing import List, Optional
 
 # Lista completa de estados de amber_nacional
 AMBER_NACIONAL_STATES: List[int] = [0] + list(range(2, 34))
+QUERETARO_PAGE_INDEXES: List[int] = [0, 1, 2, 3]
 
 
 class ShardManager:
@@ -104,7 +107,24 @@ class ShardManager:
             )
             return result
 
-        # Estrategia genérica: --shard-index i --shard-count n
+        if shard_strategy == "queretaro_pages" and scraper_name == "serial_fiscalia_queretaro":
+            result = self._split_page_indexes(QUERETARO_PAGE_INDEXES, n_shards)
+            self.logger.info(
+                f"🔀 {scraper_name}: {len(result)} shards por páginas → "
+                + " | ".join(args[1] for args in result)
+            )
+            return result
+
+        if shard_strategy in {"generic", "generic_slice", "jalisco_states"}:
+            return self._generic_shard_args(scraper_name, n_shards)
+
+        self.logger.warning(
+            f"⚠️  {scraper_name}: estrategia desconocida '{shard_strategy}', usando generic"
+        )
+        return self._generic_shard_args(scraper_name, n_shards)
+
+    def _generic_shard_args(self, scraper_name: str, n_shards: int) -> List[List[str]]:
+        """Estrategia genérica: --shard-index i --shard-count n."""
         result = [
             ["--shard-index", str(i), "--shard-count", str(n_shards)]
             for i in range(n_shards)
@@ -133,6 +153,19 @@ class ShardManager:
         # Filtrar chunks vacíos (puede pasar si n_shards > len(states))
         return [
             ["--states", ",".join(str(s) for s in chunk)]
+            for chunk in chunks
+            if chunk
+        ]
+
+    def _split_page_indexes(self, page_indexes: List[int], n_shards: int) -> List[List[str]]:
+        """Divide índices de páginas en chunks disjuntos y no vacíos."""
+        chunk_size = math.ceil(len(page_indexes) / n_shards)
+        chunks = [
+            page_indexes[i: i + chunk_size]
+            for i in range(0, len(page_indexes), chunk_size)
+        ]
+        return [
+            ["--page-indexes", ",".join(str(index) for index in chunk)]
             for chunk in chunks
             if chunk
         ]

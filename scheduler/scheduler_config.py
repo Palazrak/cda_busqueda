@@ -100,7 +100,20 @@ class SchedulerConfig:
             'max_total_workers': None,   # None = auto (cores detectados)
             # NUEVO: tope de shards por scraper en modo auto
             'default_max_shards': 2,
-            'run_on_start': True
+            'run_on_start': True,
+            'priority_queue': {
+                'weights': {
+                    'critical': 100,
+                    'high': 75,
+                    'medium': 50,
+                    'low': 25,
+                },
+                'starvation_bonus_per_min': 3.0,
+                'max_age_bonus': 60.0,
+                'record_bonus_factor': 5.0,
+                'duration_penalty_per_min': 1.5,
+                'max_duration_penalty': 30.0,
+            }
         }
     }
     
@@ -351,6 +364,36 @@ class SchedulerConfig:
         scraper_config = self.get_scraper_config(scraper_name) or {}
         args = scraper_config.get('args') or []
         return [str(arg) for arg in args]
+
+    def get_priority_config(self, scraper_name: str) -> Dict[str, Any]:
+        """
+        Retorna la configuración efectiva de prioridad para la cola.
+
+        Mantiene compatibilidad con el campo legacy `priority`.
+        """
+        scraper_config = self.get_scraper_config(scraper_name) or {}
+        queue_cfg = self.config.get('advanced', {}).get('priority_queue', {})
+        weights = queue_cfg.get('weights') or {}
+
+        tier = (
+            scraper_config.get('priority_tier')
+            or scraper_config.get('priority')
+            or 'medium'
+        )
+        tier = str(tier).lower()
+        if tier not in weights:
+            tier = 'medium'
+
+        return {
+            'tier': tier,
+            'weight': int(weights.get(tier, 50)),
+            'record_count_estimate': int(scraper_config.get('record_count_estimate') or 0),
+            'starvation_bonus_per_min': float(queue_cfg.get('starvation_bonus_per_min', 3.0)),
+            'max_age_bonus': float(queue_cfg.get('max_age_bonus', 60.0)),
+            'record_bonus_factor': float(queue_cfg.get('record_bonus_factor', 5.0)),
+            'duration_penalty_per_min': float(queue_cfg.get('duration_penalty_per_min', 1.5)),
+            'max_duration_penalty': float(queue_cfg.get('max_duration_penalty', 30.0)),
+        }
     
     #EDITTT - Helper para obtener jitter efectivo (global + override por scraper)
     def get_jitter_config(self, scraper_name: Optional[str] = None) -> Dict[str, float]:

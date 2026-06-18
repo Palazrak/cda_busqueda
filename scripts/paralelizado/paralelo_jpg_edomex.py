@@ -9,6 +9,7 @@ Prefijo hashid: 1201_
 
 import os
 import time
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import sys
@@ -121,7 +122,24 @@ def get_all_cards_data():
         return []
 
 
+def select_cards_for_shard(cards, shard_index=None, shard_count=None):
+    """Selecciona la porción de tarjetas que corresponde a este shard."""
+    if shard_index is None or not shard_count or shard_count <= 1:
+        return cards
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(
+            f"shard_index debe estar entre 0 y {shard_count - 1} (recibido {shard_index})"
+        )
+    return cards[shard_index::shard_count]
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Scraper JPG Estado de México")
+    parser.add_argument("--shard-index", type=int, default=None, help="Índice 0-based del shard a procesar")
+    parser.add_argument("--shard-count", type=int, default=None, help="Cantidad total de shards")
+    parser.add_argument("--max-records", type=int, default=None, help="Limitar tarjetas procesadas")
+    args = parser.parse_args()
+
     overall_start = time.time()
 
     cards = get_all_cards_data()
@@ -129,12 +147,19 @@ def main() -> None:
         print("No se encontraron tarjetas.")
         return
 
+    cards = select_cards_for_shard(cards, shard_index=args.shard_index, shard_count=args.shard_count)
+    if args.shard_index is not None and args.shard_count and args.shard_count > 1:
+        print(f"🔀 Shard {args.shard_index}/{args.shard_count}: {len(cards)} tarjetas asignadas.")
+
     existing_files = get_existing_files(None, S3_FOLDER)
     print(f"Archivos existentes en S3: {len(existing_files)}")
 
     if TEST_LIMIT:
         cards = cards[:TEST_LIMIT]
         print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
+    if args.max_records:
+        cards = cards[:args.max_records]
+        print(f"Limite CLI: procesando solo {args.max_records} tarjeta(s).")
 
     insert_cards_to_db(cards)
     image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]

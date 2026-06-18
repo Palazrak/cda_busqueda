@@ -133,6 +133,7 @@ scrapers:
     max_interval_min: 30
     
     priority: "high"
+    record_count_estimate: 1500
     script_filename: "paralelo_amber_nacional.py"
 
     #EDITTTT - Configuración de jitter específica para Amber Nacional
@@ -143,9 +144,9 @@ scrapers:
       min_factor: 0.5 
       max_factor: 1.9
 
-    shards: 2              # fijo en 2 durante baseline 120s para no perder sharding
+    shards: 3              # 3 shards para distribuir mejor estados en despliegue
     shard_strategy: states # divide los 32 estados entre shards
-    max_shards: 2          # tope: nunca más de 2 procesos paralelos  
+    max_shards: 3
 
   # ---------------------------------------------------------------------------
   # Scrapers habilitados para prueba integral de orquestación.
@@ -196,12 +197,13 @@ scrapers:
     base_interval_min: null
     min_interval_min: 1.5
     max_interval_min: 30
-    priority: "medium"
+    priority: "high"
+    record_count_estimate: 9847
     script_path: "scripts/serial/serial_registro_jalisco.py"
     args: ["--max-records", "250"]
-    shards: 1
-    shard_strategy: generic
-    max_shards: 1
+    shards: 3
+    shard_strategy: jalisco_states
+    max_shards: 3
 
   serial_hasvistoa_michoacan:
     enabled: true
@@ -234,11 +236,12 @@ scrapers:
     base_interval_min: null
     min_interval_min: 1.5
     max_interval_min: 30
-    priority: "medium"
+    priority: "high"
+    record_count_estimate: 744
     script_path: "scripts/serial/serial_fiscalia_queretaro.py"
-    shards: 1
-    shard_strategy: generic
-    max_shards: 1
+    shards: 4
+    shard_strategy: queretaro_pages
+    max_shards: 4
 
   serial_amber_tabasco:
     enabled: true
@@ -283,11 +286,12 @@ scrapers:
     base_interval_min: null
     min_interval_min: 1.5
     max_interval_min: 30
-    priority: "medium"
+    priority: "high"
+    record_count_estimate: 14060
     script_path: "scripts/paralelizado/paralelo_jpg_edomex.py"
-    shards: 1
-    shard_strategy: generic
-    max_shards: 1
+    shards: 2
+    shard_strategy: generic_slice
+    max_shards: 3
 
   paralelo_amber_guanajuato:
     enabled: true
@@ -394,6 +398,18 @@ advanced:
   # Ejecutar los scrapers habilitados una vez al arrancar el scheduler.
   # Después continúan con sus intervalos normales.
   run_on_start: true
+
+  priority_queue:
+    weights:
+      critical: 100
+      high: 75
+      medium: 50
+      low: 25
+    starvation_bonus_per_min: 3.0
+    max_age_bonus: 60.0
+    record_bonus_factor: 5.0
+    duration_penalty_per_min: 1.5
+    max_duration_penalty: 30.0
 # ==============================================================================
 # NOTAS DE USO
 # ==============================================================================
