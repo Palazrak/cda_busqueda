@@ -5,9 +5,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: mysecretpassword
-      POSTGRES_DB: cda_busqueda
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mysecretpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-cda_busqueda}
       PGDATA: /var/lib/postgresql/data/18/docker
     volumes:
       - postgres_data:/var/lib/postgresql/data # Named volume for persistent data
@@ -16,7 +16,7 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d cda_busqueda"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -46,7 +46,7 @@ services:
     image: postgrest/postgrest
     container_name: postgrest
     environment:
-      PGRST_DB_URI: postgres://postgres:mysecretpassword@postgres:5432/cda_busqueda
+      PGRST_DB_URI: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-mysecretpassword}@postgres:5432/${POSTGRES_DB:-cda_busqueda}
       PGRST_DB_SCHEMA: public
       PGRST_DB_ANON_ROLE: anon
     depends_on:
@@ -63,13 +63,16 @@ services:
     build:
       context: . # Changed from ./frontend to .
       dockerfile: ./frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000}
+        NEXT_PUBLIC_BACKEND_URL: ${NEXT_PUBLIC_BACKEND_URL:-http://localhost:8000}
     ports:
       - "3001:3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - NEXT_PUBLIC_API_URL=http://localhost:3000
-      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:3000}
+      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL:-http://localhost:8000}
     depends_on:
       postgrest:
         condition: service_started
@@ -84,13 +87,12 @@ services:
       dockerfile: ./backend/Dockerfile
     ports:
       - "8000:8000"
-    #edittt - ELIMINADO: healthcheck ya no es necesario para el scheduler
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz > /dev/null"]
-    #   interval: 60s
-    #   timeout: 5s
-    #   retries: 6
-    #   start_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz > /dev/null"]
+      interval: 60s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,7 +103,7 @@ services:
     environment:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - AWS_REGION=us-east-1
+      - AWS_REGION=${AWS_REGION:-us-east-1}
       - PYTHONUNBUFFERED=1
     working_dir: /app
     volumes:
@@ -128,9 +130,9 @@ services:
       - PYTHONUNBUFFERED=1
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_NAME=cda_busqueda
-      - DB_USER=postgres
-      - DB_PASSWORD=mysecretpassword
+      - DB_NAME=${POSTGRES_DB:-cda_busqueda}
+      - DB_USER=${POSTGRES_USER:-postgres}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-mysecretpassword}
       - S3_UPLOAD_ENABLED=${S3_UPLOAD_ENABLED:-false}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
