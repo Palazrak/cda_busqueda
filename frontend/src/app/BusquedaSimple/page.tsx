@@ -49,6 +49,13 @@ export default function BusquedaSimple() {
 
   const handleSearch = async () => {
     const fullName = `${nombre} ${apellidos}`.trim();
+
+    if (!fullName) {
+      setError('Por favor ingresa al menos el nombre.');
+      setResultados([]);
+      return;
+    }
+
     const encodedName = encodeURIComponent(removeAccents(fullName));
 
     try {
@@ -82,7 +89,7 @@ export default function BusquedaSimple() {
       
       <div className="row mb-4">
         <div className="col-12">
-          <div className="bg-[#0C1F43] p-4 rounded">
+          <div className="bg-[#0C1F43] p-4 rounded text-white">
             <h2 className="mb-3 font-mono">Por favor llena la siguiente información</h2>
             
             <div className="mb-3">

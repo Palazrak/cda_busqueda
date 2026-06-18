@@ -29,7 +29,7 @@ export default function Home() {
             Búsqueda de persona
           </a>
           <a
-            className="rounded-full border border-solid border-black/[.08] bg-[ffffff] transition-colors flex items-center justify-center hover:bg-[#ffffff] dark:hover:bg-[#1a1a1a] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
+            className="rounded-full border border-solid border-black/[.08] bg-[#ffffff] transition-colors flex items-center justify-center hover:bg-[#ffffff] dark:hover:bg-[#1a1a1a] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
             href="AccesoGenerarFichas"
           >
             Generar ficha persona desaparecida
