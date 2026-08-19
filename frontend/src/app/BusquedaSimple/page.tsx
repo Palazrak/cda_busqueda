@@ -49,10 +49,18 @@ export default function BusquedaSimple() {
 
   const handleSearch = async () => {
     const fullName = `${nombre} ${apellidos}`.trim();
+
+    if (!fullName) {
+      setError('Por favor ingresa al menos el nombre.');
+      setResultados([]);
+      return;
+    }
+
     const encodedName = encodeURIComponent(removeAccents(fullName));
 
     try {
-      const apiUrl = `http://localhost:3000/desaparecidos?datos->>nombre=ilike.*${encodedName}*`;
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      const apiUrl = `${apiBaseUrl}/desaparecidos?datos->>nombre=ilike.*${encodedName}*`;
       
       const response = await fetch(apiUrl);
       
@@ -81,7 +89,7 @@ export default function BusquedaSimple() {
       
       <div className="row mb-4">
         <div className="col-12">
-          <div className="bg-[#0C1F43] p-4 rounded">
+          <div className="bg-[#0C1F43] p-4 rounded text-white">
             <h2 className="mb-3 font-mono">Por favor llena la siguiente información</h2>
             
             <div className="mb-3">

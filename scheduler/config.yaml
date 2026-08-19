@@ -64,7 +64,7 @@ scrapers:
     
     # Duración estimada de ejecución en segundos
     # Se usa para calcular intervalo base (debe ser > duración para evitar overlaps)
-    estimated_duration_sec: 60
+    estimated_duration_sec: 120
     
     # Intervalo base en minutos (null = calcular automáticamente)
     # Si especificas un valor, se usa este en lugar del calculado
@@ -99,7 +99,7 @@ scrapers:
   # ---------------------------------------------------------------------------
   havistoa_chiapas:
     enabled: true
-    estimated_duration_sec: 60
+    estimated_duration_sec: 120
     base_interval_min: null
     min_interval_min: 1.5
     max_interval_min: 30
@@ -124,15 +124,16 @@ scrapers:
   amber_nacional:
     enabled: true
     
-    # Este scraper es MÁS LENTO (400s ≈ 6.7 minutos)
-    estimated_duration_sec: 400
+    # Baseline agresivo para medición; ajustar después con duración real.
+    estimated_duration_sec: 120
     base_interval_min: null
     
-    # Intervalos más largos debido a la duración
-    min_interval_min: 10   # Mínimo: 8 minutos
-    max_interval_min: 60   # Máximo: 60 minutos (1.5 horas)
+    # Baseline de plataforma disponible; ajustar después con duración real.
+    min_interval_min: 1.5
+    max_interval_min: 30
     
     priority: "high"
+    record_count_estimate: 1500
     script_filename: "paralelo_amber_nacional.py"
 
     #EDITTTT - Configuración de jitter específica para Amber Nacional
@@ -143,9 +144,202 @@ scrapers:
       min_factor: 0.5 
       max_factor: 1.9
 
-    shards: null           # null = auto (calculará ~2 respecto a chiapas)
+    shards: 3              # 3 shards para distribuir mejor estados en despliegue
     shard_strategy: states # divide los 32 estados entre shards
-    max_shards: 2          # tope: nunca más de 2 procesos paralelos  
+    max_shards: 3
+
+  # ---------------------------------------------------------------------------
+  # Scrapers habilitados para prueba integral de orquestación.
+  # Baseline inicial: 120s estimados, intervalo 1.5-30min.
+  # ---------------------------------------------------------------------------
+  serial_amber_aguascalientes:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_amber_aguascalientes.py"
+    args: ["--max-records", "60"]
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_comision_coahuila:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_comision_coahuila.py"
+    args: ["--max-pages", "1"]
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_desaparecidas_guanajuato:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_desaparecidas_guanajuato.py"
+    args: ["--max-pages", "2"]
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_registro_jalisco:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "high"
+    record_count_estimate: 9847
+    script_path: "scripts/serial/serial_registro_jalisco.py"
+    args: ["--max-records", "250"]
+    shards: 3
+    shard_strategy: jalisco_states
+    max_shards: 3
+
+  serial_hasvistoa_michoacan:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_hasvistoa_michoacan.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_desaparecidas_oaxaca:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_desaparecidas_oaxaca.py"
+    args: ["--max-pages", "2"]
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_fiscalia_queretaro:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "high"
+    record_count_estimate: 744
+    script_path: "scripts/serial/serial_fiscalia_queretaro.py"
+    shards: 4
+    shard_strategy: queretaro_pages
+    max_shards: 4
+
+  serial_amber_tabasco:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_amber_tabasco.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  serial_amber_nuevoLeon:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/serial/serial_amber_nuevoLeon.py"
+    args: ["--max-pages", "2", "--page-size", "12"]
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  paralelo_jpg_chihuahua:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/paralelizado/paralelo_jpg_chihuahua.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  paralelo_jpg_edomex:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "high"
+    record_count_estimate: 14060
+    script_path: "scripts/paralelizado/paralelo_jpg_edomex.py"
+    shards: 2
+    shard_strategy: generic_slice
+    max_shards: 3
+
+  paralelo_amber_guanajuato:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/paralelizado/paralelo_amber_guanajuato.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  paralelo_jpg_michoacan_busqueda:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/paralelizado/paralelo_jpg_michoacan_busqueda.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  paralelo_jpg_nuevo_leon:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/paralelizado/paralelo_jpg_nuevo_leon.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
+
+  paralelo_jpg_san_luis_potosi:
+    enabled: true
+    estimated_duration_sec: 120
+    base_interval_min: null
+    min_interval_min: 1.5
+    max_interval_min: 30
+    priority: "medium"
+    script_path: "scripts/paralelizado/paralelo_jpg_san_luis_potosi.py"
+    shards: 1
+    shard_strategy: generic
+    max_shards: 1
    
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y OBSERVABILIDAD
@@ -190,16 +384,32 @@ advanced:
   
   # Intervalo de limpieza de procesos terminados (segundos)
   # Cada X segundos, el executor verifica si hay procesos zombies
-  cleanup_interval_sec: 60
+  cleanup_interval_sec: 15
 
   # NUEVO: límite global de procesos concurrentes
   # null = autodetectar (recomendado): max(2, cores + 1)
   # Con 4 cores → auto = 5 slots
   # Ajusta según cuántos scrapers pesados corran a la vez
-  max_total_workers: null
+  max_total_workers: 8
 
   # NUEVO: tope de shards en modo auto (si un scraper no define max_shards)
   default_max_shards: 2
+
+  # Ejecutar los scrapers habilitados una vez al arrancar el scheduler.
+  # Después continúan con sus intervalos normales.
+  run_on_start: true
+
+  priority_queue:
+    weights:
+      critical: 100
+      high: 75
+      medium: 50
+      low: 25
+    starvation_bonus_per_min: 3.0
+    max_age_bonus: 60.0
+    record_bonus_factor: 5.0
+    duration_penalty_per_min: 1.5
+    max_duration_penalty: 30.0
 # ==============================================================================
 # NOTAS DE USO
 # ==============================================================================

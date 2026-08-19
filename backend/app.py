@@ -1,11 +1,14 @@
-from fastapi import FastAPI, UploadFile, Form, File
+from fastapi import FastAPI, UploadFile, Form, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import boto3
 import requests
-import os
-import json
 from dotenv import load_dotenv
 from typing import Optional
+
+try:
+    from .aws_config import AwsConfigError, get_rekognition_config
+except ImportError:
+    from aws_config import AwsConfigError, get_rekognition_config
 
 app = FastAPI()
 
@@ -18,12 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cargar variables de entorno
 load_dotenv()
-
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')  # usa us-east-1 por default si no hay
 
 API_ENDPOINT = "http://postgrest:3000/desaparecidos"
 SIMILARITY_THRESHOLD = 80
@@ -55,13 +53,12 @@ async def busqueda_avanzada(
     if not personas:
         return {"resultados": []}
 
-    # Conexión directa a Rekognition usando claves de AWS
-    client = boto3.client(
-        'rekognition',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION
-    )
+    try:
+        rekognition_config = get_rekognition_config()
+    except AwsConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    client = boto3.client("rekognition", **rekognition_config)
 
     resultados = []
 

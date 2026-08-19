@@ -1,8 +1,8 @@
 import Image from "next/image";
 import logoAlertaAmber from "@/images/logoAmber.png"; 
-import "./globals.css";
 
-const Navbar = (props: any) => (
+export default function Navbar() {
+  return (
     <div className="container-fluid text-bg-white font-[family-name:var(--font-geist-mono)]">
         <a className="navbar-brand" href="/">
             <Image
@@ -15,4 +15,5 @@ const Navbar = (props: any) => (
                 <span className="font-bold text-2xl">Alertas Amber</span>
         </a>
     </div>
-)
+  );
+}

@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { HomeIcon } from 'lucide-react'
 
-const Footer = (props: any) => {
+export default function Footer() {
     return (
         <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
         <Link

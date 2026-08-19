@@ -1,183 +1,147 @@
-import requests
-from bs4 import BeautifulSoup
-import json
+'''
+- [ ] Comision de Busqueda de Personas: [link](https://michoacan.gob.mx/busqueda/filtros.php)
+    - Aparecen todas las fichas como elementos a los que hacer click
+    - Al hacer click, se abre una nueva pagina con una JPG de la ficha (calidad variable)
+Prefijo hashid: 1701_
+'''
+
+import os
 import time
-import datetime
-import psycopg2
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import sys
 from urllib.parse import urljoin
 import urllib3
 
-# Deshabilitar advertencias de SSL
+import requests
+from bs4 import BeautifulSoup
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configuración de la base de datos
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"  # Cambiar a "postgres" si se ejecuta en Docker
-DB_PORT = "5432"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import build_record, insert_records
+from utils.s3_utils import upload_url_if_enabled
+
+S3_FOLDER = "jpg/"
+HASH_ID = "1701_"
+TEST_LIMIT = None  # Set to 1 for testing, None for full run
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
 BASE_URL = "https://michoacan.gob.mx/busqueda/filtros.php"
+MAX_WORKERS = 8
 
 
-def insert_many_to_db(data_list: list, extraction_date: datetime.date):
-    """Inserta registros en la base de datos."""
-    if not data_list:
-        print("⚠️  No hay datos para insertar.")
-        return
+def get_existing_files(bucket, prefix):
+    return set()
 
-    print(f"💾 Preparando inserción de {len(data_list)} registros...")
-    start_time = time.time()
-
-    conn = None
-    cur = None
-    
+def upload_image_to_s3(url, existing_files):
     try:
-        print(f"🔌 Conectando a la base de datos en {DB_HOST}:{DB_PORT}...")
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        print("✅ Conexión exitosa a la base de datos.")
-
-        insert_query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
-            VALUES (%s, %s, %s)
-        """
-        
-        records = [
-            (extraction_date, url, json.dumps(data, ensure_ascii=False)) 
-            for url, data in data_list
-        ]
-        
-        print(f"📝 Insertando {len(records)} registros...")
-        cur.executemany(insert_query, records)
-        conn.commit()
-        print(f"✅ Insertados {len(data_list)} registros en la BD correctamente.")
-
+        url = requests.utils.requote_uri(url)
+        file_name = os.path.basename(url.split("?")[0]) or "imagen.jpg"
+        file_name = f"{HASH_ID}{file_name}"
+        s3_key = f"{S3_FOLDER}{file_name}"
+        if file_name in existing_files:
+            print(f"La imagen ya existe en S3: {s3_key}")
+            return s3_key
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"Imagen subida a S3: {s3_url}")
+            return s3_url
     except Exception as e:
-        print(f"❌ Error al insertar en la base de datos: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error al descargar {url}: {e}")
+    return None
 
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
 
-    end_time = time.time()
-    print(f"⏳ Tiempo de escritura en BD: {end_time - start_time:.2f} segundos")
+def insert_cards_to_db(cards):
+    records = []
+    for card in cards:
+        imagen_url = card.get("imagen_url")
+        if not imagen_url:
+            continue
+        datos = {
+            "nombre": card.get("nombre"),
+            "folio": imagen_url,
+            "estado_alerta": "Busqueda Michoacán",
+            "imagen_url": imagen_url,
+            "descripcion_hechos": None,
+            "senas": None,
+            "localizado": False,
+        }
+        records.append(build_record(HASH_ID, datos, imagen_url, localizado=False))
+    inserted = insert_records(records)
+    print(f"Insertados en DB: {inserted} nuevos de {len(records)} registros Michoacán")
+    return inserted
 
 
 def get_all_cards_data():
-    """Obtiene todas las tarjetas con imagen y nombre desde la página."""
     cards_data = []
-    
     try:
-        print(f"📥 Descargando datos desde {BASE_URL}...")
+        print(f"Descargando datos desde {BASE_URL}...")
         response = requests.get(BASE_URL, headers=HEADERS, timeout=20, verify=False)
         if response.status_code != 200:
-            print(f"❌ Error al obtener página: {response.status_code}")
+            print(f"Error al obtener página: {response.status_code}")
             return []
 
         soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Buscar todos los divs con el estilo específico que contienen los nombres
         name_divs = soup.find_all("div", style=lambda x: x and "background-color:#FFC3D0" in x)
-        
+
         for name_div in name_divs:
-            # Extraer el nombre del h5 dentro del div
             h5 = name_div.find("h5")
             nombre = h5.get_text(strip=True) if h5 else None
-            
+
             if not nombre:
                 continue
-            
-            # Buscar la imagen en el mismo contenedor padre (el <a> tag)
+
             parent = name_div.parent
             imagen_url = None
-            
+
             if parent:
                 img = parent.find("img", class_="img-fluid")
                 if img:
                     imagen_url = img.get("src", "")
-                    # Convertir URL relativa a absoluta si es necesario
                     if imagen_url and not imagen_url.startswith("http"):
                         imagen_url = urljoin(BASE_URL, imagen_url)
-            
-            # Solo agregar si tenemos nombre e imagen
+
             if nombre and imagen_url:
-                cards_data.append({
-                    "imagen_url": imagen_url,
-                    "nombre": nombre,
-                    "detalle_url": BASE_URL
-                })
-        
-        print(f"✅ Se encontraron {len(cards_data)} tarjetas válidas.")
+                cards_data.append({"imagen_url": imagen_url, "nombre": nombre})
+
+        print(f"Se encontraron {len(cards_data)} tarjetas válidas.")
         return cards_data
 
     except Exception as e:
-        print(f"❌ Error al obtener datos de las tarjetas: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error al obtener datos de las tarjetas: {e}")
         return []
 
 
-def scrape_all_cards():
-    """Scrapea todas las tarjetas."""
-    start_time = time.time()
+def main() -> None:
+    overall_start = time.time()
 
-    cards_data = get_all_cards_data()
-    if not cards_data:
-        print("⚠️  No se encontraron tarjetas para procesar.")
-        return []
+    cards = get_all_cards_data()
+    if not cards:
+        print("No se encontraron tarjetas.")
+        return
 
-    print(f"📊 Procesando {len(cards_data)} tarjetas...")
-    
-    # Procesar directamente sin verificar imágenes (más rápido)
-    all_data = []
-    for card in cards_data:
-        try:
-            data = {
-                "imagen_url": card["imagen_url"],
-                "nombre": card.get("nombre"),
-                "estado_alerta": "Desaparecidos Michoacán"
-            }
-            url_origen = card.get("detalle_url") or card["imagen_url"]
-            all_data.append((url_origen, data))
-        except Exception:
-            continue
+    existing_files = get_existing_files(None, S3_FOLDER)
+    print(f"Archivos existentes en S3: {len(existing_files)}")
 
-    end_time = time.time()
-    print(f"⏳ Tiempo total de scraping: {end_time - start_time:.2f} segundos")
-    print(f"✅ {len(all_data)} tarjetas procesadas correctamente.")
+    if TEST_LIMIT:
+        cards = cards[:TEST_LIMIT]
+        print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
 
-    return all_data
+    insert_cards_to_db(cards)
+    image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]
+    print(f"Subiendo {len(image_urls)} imágenes a S3...")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(upload_image_to_s3, url, existing_files) for url in image_urls]
+        for f in as_completed(futures):
+            f.result()
+
+    print(f"Tiempo total: {time.time() - overall_start:.2f} segundos")
 
 
-def main():
-    """Ejecuta el scraping."""
-    global_start_time = time.time()
-
-    extraction_date = datetime.date.today()
-    
-    # SCRAPING
-    scraped_data = scrape_all_cards()
-    
-    # INSERCIÓN EN BD
-    insert_many_to_db(scraped_data, extraction_date)
-
-    global_end_time = time.time()
-    print(f"⏳ Tiempo total de ejecución: {global_end_time - global_start_time:.2f} segundos")
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

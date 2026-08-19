@@ -48,10 +48,12 @@ class ScraperExecutor:
 
     def __init__(
         self,
-        scripts_dir: str = "/app/scripts/paralelizado",
+        app_dir: str = "/app",
+        scripts_dir: Optional[str] = None,
         timeout_sec: Optional[int] = 900,
     ):
-        self.scripts_dir = Path(scripts_dir)
+        self.app_dir = Path(app_dir)
+        self.scripts_dir = Path(scripts_dir) if scripts_dir else self.app_dir / "scripts" / "paralelizado"
         self.timeout_sec = timeout_sec
         self.logger = logging.getLogger("ScraperExecutor")
 
@@ -68,8 +70,40 @@ class ScraperExecutor:
 
         self.logger.info(
             f"✅ ScraperExecutor inicializado "
-            f"(scripts_dir={scripts_dir}, timeout={timeout_sec}s)"
+            f"(app_dir={self.app_dir}, scripts_dir={self.scripts_dir}, timeout={timeout_sec}s)"
         )
+
+    def resolve_script_path(self, script_path: str) -> Path:
+        """
+        Resuelve rutas nuevas y legacy.
+
+        - scripts/serial/foo.py -> /app/scripts/serial/foo.py
+        - scripts/paralelizado/foo.py -> /app/scripts/paralelizado/foo.py
+        - foo.py -> /app/scripts/paralelizado/foo.py (legacy)
+        """
+        requested = Path(script_path)
+        if requested.is_absolute():
+            return requested
+        if len(requested.parts) == 1:
+            return self.scripts_dir / requested
+        return self.app_dir / requested
+
+    def _build_process_env(self, env_vars: Optional[Dict[str, str]]) -> Dict[str, str]:
+        process_env = os.environ.copy()
+        if env_vars:
+            process_env.update(env_vars)
+
+        pythonpath_parts = [
+            str(self.app_dir / "scripts"),
+            str(self.app_dir),
+        ]
+        existing_pythonpath = process_env.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_parts.extend(
+                part for part in existing_pythonpath.split(os.pathsep) if part
+            )
+        process_env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+        return process_env
 
     # ------------------------------------------------------------------
     # Lanzamiento de procesos
@@ -78,8 +112,9 @@ class ScraperExecutor:
     def execute_shards(
         self,
         scraper_name: str,
-        script_filename: str,
         shard_args_list: List[List[str]],
+        script_path: Optional[str] = None,
+        script_filename: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
@@ -87,7 +122,8 @@ class ScraperExecutor:
 
         Args:
             scraper_name:    Nombre identificador del scraper.
-            script_filename: Archivo Python a ejecutar.
+            script_path:     Ruta del script relativa a /app o absoluta.
+            script_filename: Archivo Python legacy en scripts/paralelizado.
             shard_args_list: Lista de listas de args, una por shard.
                              [[]] para scraper sin sharding.
             env_vars:        Variables de entorno adicionales.
@@ -100,27 +136,29 @@ class ScraperExecutor:
             self.logger.warning(f"⏭️  {scraper_name} ya está en ejecución, skip")
             return False
 
-        script_path = self.scripts_dir / script_filename
-        if not script_path.exists():
-            self.logger.error(f"❌ Script no encontrado: {script_path}")
-            raise FileNotFoundError(f"Script no existe: {script_path}")
+        requested_script = script_path or script_filename
+        if not requested_script:
+            raise ValueError(f"{scraper_name}: falta script_path/script_filename")
 
-        process_env = os.environ.copy()
-        if env_vars:
-            process_env.update(env_vars)
+        resolved_script_path = self.resolve_script_path(requested_script)
+        if not resolved_script_path.exists():
+            self.logger.error(f"❌ Script no encontrado: {resolved_script_path}")
+            raise FileNotFoundError(f"Script no existe: {resolved_script_path}")
+
+        process_env = self._build_process_env(env_vars)
 
         n_shards = len(shard_args_list)
         launched_shards = []
         overall_start = time.time()
 
         for shard_id, extra_args in enumerate(shard_args_list):
-            cmd = [sys.executable, str(script_path)] + extra_args
+            cmd = [sys.executable, str(resolved_script_path)] + extra_args
             try:
                 process = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=str(self.scripts_dir.parent),
+                    stdout=None,
+                    stderr=None,
+                    cwd=str(self.app_dir),
                     env=process_env,
                     text=True,
                     bufsize=1,
@@ -156,7 +194,7 @@ class ScraperExecutor:
             "shards": launched_shards,
             "start_time": overall_start,
             "start_datetime": datetime.now(),
-            "script_filename": script_filename,
+            "script_path": str(resolved_script_path),
             "n_shards": n_shards,
         }
 
@@ -184,7 +222,8 @@ class ScraperExecutor:
     def execute(
         self,
         scraper_name: str,
-        script_filename: str,
+        script_path: Optional[str] = None,
+        script_filename: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
@@ -193,8 +232,9 @@ class ScraperExecutor:
         """
         return self.execute_shards(
             scraper_name=scraper_name,
-            script_filename=script_filename,
+            script_path=script_path,
             shard_args_list=[[]],
+            script_filename=script_filename,
             env_vars=env_vars,
         )
 
@@ -251,7 +291,7 @@ class ScraperExecutor:
         completed = []
         to_remove = []
 
-        for scraper_name, proc_info in self.active_processes.items():
+        for scraper_name, proc_info in list(self.active_processes.items()):
             shards = proc_info["shards"]
 
             # ¿Terminaron TODOS los shards?
@@ -307,7 +347,7 @@ class ScraperExecutor:
             completed.append((scraper_name, duration, success))
 
         for name in to_remove:
-            del self.active_processes[name]
+            self.active_processes.pop(name, None)
 
         return completed
 
@@ -418,5 +458,5 @@ class ScraperExecutor:
         total = sum(s.get("total_runs", 0) for s in self.execution_stats.values())
         return (
             f"ScraperExecutor(active={active}, total_runs={total}, "
-            f"scripts_dir={self.scripts_dir})"
+            f"app_dir={self.app_dir}, scripts_dir={self.scripts_dir})"
         )

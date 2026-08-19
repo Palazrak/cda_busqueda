@@ -27,7 +27,8 @@ WORKDIR $APP_HOME
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libxslt-dev \
-    gcc \
+    build-essential \
+    linux-libc-dev \
     wget \
     procps \
     && rm -rf /var/lib/apt/lists/*
@@ -61,13 +62,10 @@ COPY scheduler/config.yaml ${APP_HOME}/config.yaml
 # =============================================================================
 # COPIAR SCRIPTS DE SCRAPING
 # =============================================================================
-#edittt - Crear directorio para scripts
-RUN mkdir -p ${APP_HOME}/scripts/paralelizado
-
-#edittt - Los scripts se montarán como volumen desde docker-compose.yml
-# Pero creamos el directorio aquí para que exista incluso sin volumen
-# Si quisieras incluir los scripts en la imagen (no recomendado):
-# COPY ../scripts/ ${APP_HOME}/scripts/
+# La imagen debe ser autosuficiente para ECS/ECR. En desarrollo, docker-compose
+# puede montar ./scripts encima de este directorio para iterar sin rebuild.
+RUN mkdir -p ${APP_HOME}/scripts/paralelizado ${APP_HOME}/scripts/serial ${APP_HOME}/scripts/utils
+COPY scripts/ ${APP_HOME}/scripts/
 
 # =============================================================================
 # HEALTH CHECK
@@ -105,7 +103,7 @@ CMD ["python", "scheduler.py"]
 # Run standalone (sin compose):
 #   docker run -it --rm \
 #     -v $(pwd)/scripts:/app/scripts:ro \
-#     -v $(pwd)/scheduler/config.yaml:/app/config.yaml:ro \
+#     -v $(pwd)/scheduler:/app:ro \
 #     --network app-network \
 #     cda-scheduler:latest
 #

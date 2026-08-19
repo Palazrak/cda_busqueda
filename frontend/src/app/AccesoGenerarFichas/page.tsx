@@ -1,8 +1,3 @@
-import Image from "next/image";
-import Link from 'next/link'
-import { HomeIcon } from 'lucide-react'
-import logoAlertaAmber from "@/images/logoAmber.png"
-
 export default function AccesoGenerarFichas() {
     return (
         <div>
@@ -22,7 +17,7 @@ export default function AccesoGenerarFichas() {
         </div>
       </section>
       <div className="col-12">
-        <div className="container bg-[F5E0BC] rounded">
+        <div className="container bg-[#F5E0BC] rounded">
           <div className="row">
             <div className="col-12 col-md-8 offset-md-2"></div>
            

@@ -1,205 +1,158 @@
+'''
+  - [ ] Busqueda de Personas no Localizadas o Desaparecidas: [link](https://www.hcnl.gob.mx/desaparecidos/)
+    - Hay un Wrapper de desaparecidos que contiene imagen, nombre y mas info
+    - Al darle click a la imagen, sale una ventana con la ficha en JPG
+    - Parece que hay un TXT llamado "desaparecidos" que incluye el nombre y el url de la imagen de desaparicion (el URL aparece hasta con whatsappdownloads)
+Prefijo hashid: 2001_
+'''
+
+import os
+import time
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import sys
+
 import requests
 from bs4 import BeautifulSoup
-import json
-import time
-import datetime
-import psycopg2
-from urllib.parse import urljoin
 import urllib3
 
-# Deshabilitar advertencias de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configuración de la base de datos
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"  # Cambiar a "postgres" si se ejecuta en Docker
-DB_PORT = "5432"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import build_record, insert_records
+from utils.s3_utils import upload_url_if_enabled
+
+S3_FOLDER = "jpg/"
+HASH_ID = "2001_"
+TEST_LIMIT = None  # Set to 1 for testing, None for full run
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
 BASE_URL = "https://www.hcnl.gob.mx/desaparecidos/"
 DATA_URL = "https://www.hcnl.gob.mx/desaparecidos/desaparecidos.txt"
+MAX_WORKERS = 8
 
 
-def insert_many_to_db(data_list: list, extraction_date: datetime.date):
-    """Inserta registros en la base de datos."""
-    if not data_list:
-        print("⚠️  No hay datos para insertar.")
-        return
+def get_existing_files(bucket, prefix):
+    return set()
 
-    print(f"💾 Preparando inserción de {len(data_list)} registros...")
-    start_time = time.time()
-
-    conn = None
-    cur = None
-    
+def upload_image_to_s3(url, existing_files):
     try:
-        print(f"🔌 Conectando a la base de datos en {DB_HOST}:{DB_PORT}...")
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        print("✅ Conexión exitosa a la base de datos.")
-
-        insert_query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
-            VALUES (%s, %s, %s)
-        """
-        
-        records = [
-            (extraction_date, url, json.dumps(data, ensure_ascii=False)) 
-            for url, data in data_list
-        ]
-        
-        print(f"📝 Insertando {len(records)} registros...")
-        cur.executemany(insert_query, records)
-        conn.commit()
-        print(f"✅ Insertados {len(data_list)} registros en la BD correctamente.")
-
+        url = requests.utils.requote_uri(url)
+        file_name = os.path.basename(url.split("?")[0]) or "imagen.jpg"
+        file_name = f"{HASH_ID}{file_name}"
+        s3_key = f"{S3_FOLDER}{file_name}"
+        if file_name in existing_files:
+            print(f"La imagen ya existe en S3: {s3_key}")
+            return s3_key
+        s3_url = upload_url_if_enabled(url, s3_key, headers=HEADERS, timeout=20)
+        if s3_url:
+            print(f"Imagen subida a S3: {s3_url}")
+            return s3_url
     except Exception as e:
-        print(f"❌ Error al insertar en la base de datos: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error al descargar {url}: {e}")
+    return None
 
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
 
-    end_time = time.time()
-    print(f"⏳ Tiempo de escritura en BD: {end_time - start_time:.2f} segundos")
+def insert_cards_to_db(cards):
+    records = []
+    for card in cards:
+        imagen_url = card.get("imagen_url")
+        if not imagen_url:
+            continue
+        datos = {
+            "nombre": card.get("nombre"),
+            "folio": imagen_url,
+            "estado_alerta": "Personas Desaparecidas Nuevo León",
+            "imagen_url": imagen_url,
+            "descripcion_hechos": None,
+            "senas": None,
+            "localizado": False,
+        }
+        records.append(build_record(HASH_ID, datos, imagen_url, localizado=False))
+    inserted = insert_records(records)
+    print(f"Insertados en DB: {inserted} nuevos de {len(records)} registros Nuevo León")
+    return inserted
 
 
 def get_all_cards_data():
-    """Obtiene todas las tarjetas con imagen y nombre desde el archivo JSON."""
     cards_data = []
-    
     try:
-        print(f"📥 Descargando datos desde {DATA_URL}...")
+        print(f"Descargando datos desde {DATA_URL}...")
         response = requests.get(DATA_URL, headers=HEADERS, timeout=20, verify=False)
         if response.status_code != 200:
-            print(f"❌ Error al obtener datos: {response.status_code}")
+            print(f"Error al obtener datos: {response.status_code}")
             return []
 
-        # Parsear el JSON
         data_json = json.loads(response.text)
         records = data_json.get("data", [])
-        print(f"📊 Se encontraron {len(records)} registros en el archivo JSON.")
-        
+        print(f"Se encontraron {len(records)} registros en el archivo JSON.")
+
         for record in records:
             if not record or len(record) < 2:
                 continue
-            
-            # El primer elemento contiene el HTML con la imagen y el nombre
+
             image_html = record[0] if len(record) > 0 else ""
             name_html = record[1] if len(record) > 1 else ""
-            fecha_desaparicion = record[2] if len(record) > 2 else ""
-            estatus = record[3] if len(record) > 3 else ""
-            
-            # Parsear el HTML para extraer imagen y nombre
+
             soup_image = BeautifulSoup(image_html, "html.parser")
             soup_name = BeautifulSoup(name_html, "html.parser")
-            
+
             imagen_url = None
             nombre = None
-            
-            # Buscar el link con la imagen
+
             image_link = soup_image.find("a", class_="shadow")
             if image_link:
-                # La imagen original está en el href
                 imagen_url = image_link.get("href", "")
-                # El nombre está en el atributo title
                 nombre = image_link.get("title", "")
-            
-            # Si no encontramos el nombre en el image_link, buscarlo en name_html
+
             if not nombre:
                 name_link = soup_name.find("a")
                 if name_link:
-                    # Buscar el h5 dentro del link
                     h5 = name_link.find("h5")
                     if h5:
-                        # Extraer el texto sin el icono
-                        nombre = h5.get_text(strip=True)
-                        # Limpiar el texto (remover el icono de external link si está)
-                        nombre = nombre.replace("  ", " ").strip()
-            
-            # Solo agregar si tenemos nombre e imagen
+                        nombre = h5.get_text(strip=True).replace("  ", " ").strip()
+
             if nombre and imagen_url:
-                cards_data.append({
-                    "imagen_url": imagen_url,
-                    "nombre": nombre,
-                    "fecha_desaparicion": fecha_desaparicion,
-                    "estatus": estatus,
-                    "detalle_url": BASE_URL
-                })
-        
-        print(f"✅ Se encontraron {len(cards_data)} tarjetas válidas.")
+                cards_data.append({"imagen_url": imagen_url, "nombre": nombre})
+
+        print(f"Se encontraron {len(cards_data)} tarjetas válidas.")
         return cards_data
 
     except Exception as e:
-        print(f"❌ Error al obtener datos de las tarjetas: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error al obtener datos de las tarjetas: {e}")
         return []
 
 
-def scrape_all_cards():
-    """Scrapea todas las tarjetas."""
-    start_time = time.time()
+def main() -> None:
+    overall_start = time.time()
 
-    cards_data = get_all_cards_data()
-    if not cards_data:
-        print("⚠️  No se encontraron tarjetas para procesar.")
-        return []
+    cards = get_all_cards_data()
+    if not cards:
+        print("No se encontraron tarjetas.")
+        return
 
-    print(f"📊 Procesando {len(cards_data)} tarjetas...")
-    
-    # Procesar directamente sin verificar imágenes (más rápido)
-    all_data = []
-    for card in cards_data:
-        try:
-            data = {
-                "imagen_url": card["imagen_url"],
-                "nombre": card.get("nombre"),
-                "fecha_desaparicion": card.get("fecha_desaparicion"),
-                "estatus": card.get("estatus"),
-                "estado_alerta": "Desaparecidos Nuevo León"
-            }
-            url_origen = card.get("detalle_url") or card["imagen_url"]
-            all_data.append((url_origen, data))
-        except Exception:
-            continue
+    existing_files = get_existing_files(None, S3_FOLDER)
+    print(f"Archivos existentes en S3: {len(existing_files)}")
 
-    end_time = time.time()
-    print(f"⏳ Tiempo total de scraping: {end_time - start_time:.2f} segundos")
-    print(f"✅ {len(all_data)} tarjetas procesadas correctamente.")
+    if TEST_LIMIT:
+        cards = cards[:TEST_LIMIT]
+        print(f"Modo de prueba: procesando solo {TEST_LIMIT} imagen(es).")
 
-    return all_data
+    insert_cards_to_db(cards)
+    image_urls = [c["imagen_url"] for c in cards if c.get("imagen_url")]
+    print(f"Subiendo {len(image_urls)} imágenes a S3...")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(upload_image_to_s3, url, existing_files) for url in image_urls]
+        for f in as_completed(futures):
+            f.result()
+
+    print(f"Tiempo total: {time.time() - overall_start:.2f} segundos")
 
 
-def main():
-    """Ejecuta el scraping."""
-    global_start_time = time.time()
-
-    extraction_date = datetime.date.today()
-    
-    # SCRAPING
-    scraped_data = scrape_all_cards()
-    
-    # INSERCIÓN EN BD
-    insert_many_to_db(scraped_data, extraction_date)
-
-    global_end_time = time.time()
-    print(f"⏳ Tiempo total de ejecución: {global_end_time - global_start_time:.2f} segundos")
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

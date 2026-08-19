@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, type ChangeEvent } from 'react';
 
 // Definir el tipo de dato esperado
 interface PersonaDesaparecida {
@@ -37,7 +37,7 @@ export default function BusquedaAvanzada() {
   const [resultados, setResultados] = useState<PersonaDesaparecida[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const handleOnChangeFoto = (event: any) => {
+  const handleOnChangeFoto = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       setFoto(file);
@@ -67,7 +67,8 @@ export default function BusquedaAvanzada() {
       }
       formData.append('foto', foto);
 
-      const response = await fetch('http://localhost:8000/busqueda-avanzada', {
+      const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+      const response = await fetch(`${backendBaseUrl}/busqueda-avanzada`, {
         method: 'POST',
         body: formData,
       });
@@ -78,8 +79,8 @@ export default function BusquedaAvanzada() {
 
       const data = await response.json();
       setResultados(data.resultados || []);
-    } catch (err: any) {
-      setError(err.message || 'Error desconocido.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Error desconocido.');
       setResultados([]);
     }
   };
@@ -100,7 +101,7 @@ export default function BusquedaAvanzada() {
       </section>
 
       <div className="col-12">
-        <div className="container bg-[F5E0BC] rounded p-4">
+        <div className="container bg-[#F5E0BC] rounded p-4">
           <span className="text-black fw-bold fs-5 font-[family-name:var(--font-geist-mono)] d-block mb-4">
             Por favor llena la siguiente información
           </span>

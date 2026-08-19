@@ -1,39 +1,27 @@
 import requests
 from bs4 import BeautifulSoup
+import argparse
 import re
 import fitz  # PyMuPDF
 import time
-import psycopg2
 import json
-import datetime
-import hashlib
-import boto3
-from botocore.exceptions import ClientError
-import os
+from pathlib import Path
+import sys
 from dotenv import load_dotenv
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import insert_payload, make_hashid as make_shared_hashid
+from utils.s3_utils import upload_bytes_if_enabled
 
 # Cargar variables de entorno
 load_dotenv()
 
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres" # Cambiar a "postgres" si se ejecuta en Docker
-DB_PORT = "5432"
-
-# Configuración S3
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    region_name=AWS_REGION
-)
-S3_BUCKET = "cdas-2025-alertas-amber"
 S3_PREFIX = "pdf"
+
+TEST_LIMIT = None
 
 BASE_URL = "https://www.fiscalia-aguascalientes.gob.mx"
 PAGE_URL = BASE_URL + "/"
@@ -49,17 +37,7 @@ def normalize_for_hash(value):
 def make_hashid(parsed_data):
     """Genera el hash a partir de: fecha_desaparicion, localizado, nombre, edad, resumen_hechos, senas_particulares.
     Devuelve el hashid con prefijo 0202_ (sin extensión) y el nombre de archivo 0202_<hash>.pdf"""
-    parts = [
-        normalize_for_hash(parsed_data.get("fecha_desaparicion")),
-        normalize_for_hash(parsed_data.get("localizado")),
-        normalize_for_hash(parsed_data.get("nombre")),
-        normalize_for_hash(parsed_data.get("edad")),
-        normalize_for_hash(parsed_data.get("resumen_hechos")),
-        normalize_for_hash(parsed_data.get("senas_particulares")),
-    ]
-    joined = "||".join(parts)
-    h = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
-    hashid = f"0202_{h}"
+    hashid = make_shared_hashid("0202_", parsed_data)
     filename = f"{hashid}.pdf"
     s3_key = f"{S3_PREFIX}/{filename}"
     return hashid, filename, s3_key
@@ -171,28 +149,16 @@ def get_all_pdf_links():
 
 
 def s3_object_exists(s3_client, bucket, key):
-    try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as e:
-        code = e.response.get('Error', {}).get('Code', '')
-        if code in ("404", "NoSuchKey", 'NotFound'):
-            return False
-        # Para permisos u otros errores, re-lanzar
-        raise
+    return False
 
 
-def upload_pdf_to_s3_if_not_exists(pdf_bytes, bucket, key, s3_client):
-    if s3_object_exists(s3_client, bucket, key):
-        print(f"☑️ PDF already exists in S3: s3://{bucket}/{key}")
-        return False
-    try:
-        s3_client.put_object(Bucket=bucket, Key=key, Body=pdf_bytes, ContentType='application/pdf')
-        print(f"✅ PDF uploaded to s3://{bucket}/{key}")
+def upload_pdf_to_s3_if_not_exists(pdf_bytes, key):
+    s3_url = upload_bytes_if_enabled(pdf_bytes, key, content_type="application/pdf")
+    if s3_url:
+        print(f"✅ PDF uploaded to {s3_url}")
         return True
-    except Exception as e:
-        print(f"❌ Error uploading to S3: {e}")
-        return False
+    print("☑️ S3 deshabilitado; se conserva pdf_url de origen")
+    return False
 
 
 def extract_text_from_pdf_url(pdf_url):
@@ -287,44 +253,23 @@ def parse_pdf_data_general(text):
 
 
 def insert_into_db(data, url_origen, hashid):
-    extraction_date = datetime.date.today()
     localizado = data.get("localizado", False)
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD,
-            host=DB_HOST, port=DB_PORT
+        inserted = insert_payload(
+            "0202_",
+            data,
+            url_origen,
+            localizado=localizado,
+            hashid=hashid,
         )
-        cur = conn.cursor()
-        # Verificar existencia exactamente para (hashid, localizado)
-        cur.execute("SELECT 1 FROM public.desaparecidos WHERE hashid = %s AND localizado = %s LIMIT 1", (hashid, localizado))
-        exists = cur.fetchone() is not None
-        if exists:
-            print(f"✔ No hay que insertar: ya existe registro con hashid={hashid} y localizado={localizado}")
-            return False
-
-        query = "INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, localizado, hashid, datos) VALUES (%s, %s, %s, %s, %s)"
-        cur.execute(query, (extraction_date, url_origen, localizado, hashid, json.dumps(data)))
-        conn.commit()
-        print(f"✅ Insertado en DB: hashid={hashid}")
-        return True
+        print(f"✅ Insertados en DB: {inserted} hashid={hashid}")
+        return bool(inserted)
     except Exception as e:
         print(f"❌ Error al insertar en la base de datos: {e}")
         return False
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
 
-def process_pdfs(pdf_links):
+def process_pdfs(pdf_links, max_records=None):
+    count = 0
     for entry in pdf_links:
         pdf_text, pdf_bytes = extract_text_from_pdf_url(entry["pdf_url"])
         if not pdf_text or not pdf_bytes:
@@ -371,7 +316,7 @@ def process_pdfs(pdf_links):
 
         # Subir a S3 si no existe
         try:
-            uploaded = upload_pdf_to_s3_if_not_exists(pdf_bytes, S3_BUCKET, s3_key, s3)
+            uploaded = upload_pdf_to_s3_if_not_exists(pdf_bytes, s3_key)
         except Exception as e:
             print(f"❌ Error verificando/guardando en S3: {e}")
             uploaded = False
@@ -380,14 +325,22 @@ def process_pdfs(pdf_links):
         print(f"🔑 HashID: {hashid}")
         insert_into_db(data, entry["pdf_url"], hashid)
         time.sleep(0.5)
+        count += 1
+        limit = max_records or TEST_LIMIT
+        if limit and count >= limit:
+            break
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Scraper Amber/boletines Aguascalientes")
+    parser.add_argument("--max-records", type=int, default=None, help="Limita registros procesados en esta corrida")
+    args = parser.parse_args()
+
     pdf_links = get_all_pdf_links()
     if not pdf_links:
         print("❌ No se encontraron PDFs.")
         return
-    process_pdfs(pdf_links)
+    process_pdfs(pdf_links, max_records=args.max_records)
     print(f"✅ Se procesaron {len(pdf_links)} registros.")
 
 if __name__ == "__main__":

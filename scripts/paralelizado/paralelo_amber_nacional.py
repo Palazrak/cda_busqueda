@@ -1,22 +1,21 @@
 import requests
 from bs4 import BeautifulSoup
 import re
-import json
 import datetime
-import psycopg2
 import fitz  # PyMuPDF
 import base64
 import time
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse #NUEVO
+from pathlib import Path
+import sys
 
-# Configuración de la base de datos
-DB_NAME = "cda_busqueda"
-DB_USER = "postgres"
-DB_PASSWORD = "mysecretpassword"
-DB_HOST = "postgres"
-DB_PORT = "5432"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from utils.db_utils import DesaparecidoRecord, insert_records, make_hashid
 
 # Diccionario para mapear el id_estado con el estado correspondiente (orden alfabético)
 estado_mapping = {
@@ -55,38 +54,40 @@ estado_mapping = {
     33: "ZACATECAS"
 }
 
+def normalize_for_db(data, source_url):
+    data["folio"] = data.get("folio") or data.get("reporte_num") or data.get("pdf_link") or source_url
+    data["localizado"] = False
+    data["descripcion_hechos"] = data.get("descripcion_hechos") or data.get("resumen_hechos")
+    data["senas"] = data.get("senas") or data.get("senas_particulares")
+    data["estado_alerta"] = data.get("estado_alerta") or "Desaparecidos Amber Nacional"
+    return data
+
+
 def insert_many_to_db(data_list, extraction_date, source_url):
     if not data_list:
         return
-    conn = None
-    cur = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        insert_query = """
-            INSERT INTO public.desaparecidos (fecha_extraccion, url_origen, datos)
-            VALUES (%s, %s, %s)
-        """
-        records = [
-            (extraction_date, source_url, json.dumps(data, ensure_ascii=False))
-            for data in data_list
-        ]
-        cur.executemany(insert_query, records)
-        conn.commit()
-        print(f"✅ Insertados {len(records)} registros en la BD.")
+        records = []
+        for data in data_list:
+            if not data:
+                continue
+            normalized = normalize_for_db(data, source_url)
+            localizado = normalized.get("localizado", False)
+            hashid = make_hashid("0002_", normalized)
+            records.append(
+                DesaparecidoRecord(
+                    fecha_extraccion=extraction_date,
+                    url_origen=normalized.get("pdf_link") or source_url,
+                    localizado=localizado,
+                    hashid=hashid,
+                    datos=normalized,
+                )
+            )
+
+        inserted = insert_records(records)
+        print(f"✅ Insertados {inserted} registros nuevos en la BD.")
     except Exception as e:
         print("Error insertando en BD:", e)
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
 
 def parse_pdf_text(text):
     data = {}
